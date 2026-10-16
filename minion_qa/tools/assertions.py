@@ -42,6 +42,12 @@ def clear_assertion_history() -> None:
     _session_assertion_history.clear()
 
 
+def record_assertion(result: AssertionResult) -> None:
+    """Record an assertion result into the session history."""
+    _session_assertion_history.append(result)
+
+
+
 # ---------------------------------------------------------------------------
 # HTML -> visible text extractor (from Leaka AI)
 # ---------------------------------------------------------------------------

@@ -9,14 +9,7 @@ venv/
 ENV/
 
 # OpenMinion local database & runtime state
-.openminion/**/*.db
-.openminion/**/*.sqlite
-.openminion/**/*.sqlite.bak/
-.openminion/**/*.bak/
-.openminion/state/
-.openminion/telemetry/
-.openminion/retrieve/
-.openminion/evidence/
+.openminion/
 
 # Pytest & test cache
 .pytest_cache/
