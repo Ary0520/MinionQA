@@ -1,0 +1,34 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# OpenMinion local database & runtime state
+.openminion/**/*.db
+.openminion/**/*.sqlite
+.openminion/**/*.sqlite.bak/
+.openminion/**/*.bak/
+.openminion/state/
+.openminion/telemetry/
+.openminion/retrieve/
+.openminion/evidence/
+
+# Pytest & test cache
+.pytest_cache/
+
+# Test artifacts (screenshots & reports)
+screenshots/*.png
+!screenshots/.gitkeep
+reports/*.md
+!reports/.gitkeep
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minion-qa"
+version = "0.1.0"
+description = "Autonomous Web QA and Revenue-Flow Validation Agent powered by OpenMinion 0.1 for Cortensor Hackathon #5"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "MinionQA Team" }
+]
+dependencies = [
+    "openminion>=0.1.0",
+    "playwright>=1.40.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0.0",
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+minion-qa = "minion_qa.agent:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "examples"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
