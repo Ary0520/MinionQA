@@ -116,6 +116,11 @@ def test_planner_mocked_execution_flow():
         }
         mock_assert.return_value = "[PASSED] page_contains_text on body"
         mock_browser = MagicMock()
+        mock_browser.navigate.return_value = {
+            "url": "https://example.com",
+            "title": "Example Domain",
+            "error": None,
+        }
         mock_browser.get_compact_dom.return_value = {
             "url": "https://example.com",
             "title": "Example Domain",

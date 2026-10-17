@@ -418,6 +418,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <i class="fa-solid fa-triangle-exclamation text-rose-400"></i>
             <span>⚠️ Pricing Anomaly Catch</span>
           </button>
+          <button type="button" onclick="loadPreset('dreamvault')" class="px-3 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-purple-300 border border-purple-800/60 text-xs font-medium flex items-center gap-1.5 transition">
+            <i class="fa-solid fa-cloud text-purple-400"></i>
+            <span>✨ Dream Vault Auth</span>
+          </button>
         </div>
       </div>
 
@@ -675,11 +679,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById('autoUrl').value = 'https://www.saucedemo.com';
         document.getElementById('autoGoal').value = 'Log in with standard_user and secret_sauce, add backpack to cart, proceed to checkout for Alice 94103, and assert total price equals $99.99 to verify financial anomaly detection.';
         document.getElementById('autoMaxTurns').value = '15';
+      } else if (type === 'dreamvault') {
+        document.getElementById('autoUrl').value = 'https://dreamvault.netlify.app';
+        document.getElementById('autoGoal').value = 'Click Log In, enter email aryansinhag2006@gmail.com and password sinha123@, click Log In button, and verify authentication succeeds.';
+        document.getElementById('autoMaxTurns').value = '10';
       }
     }
 
     async function runAutonomous() {
-      const url = document.getElementById('autoUrl').value.trim();
+      let url = document.getElementById('autoUrl').value.trim();
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = 'https://' + url;
+        document.getElementById('autoUrl').value = url;
+      }
       const goal = document.getElementById('autoGoal').value.trim();
       const maxTurns = parseInt(document.getElementById('autoMaxTurns').value);
       const headless = document.getElementById('autoHeadless').checked;
@@ -797,7 +809,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function runCustom() {
-      const url = document.getElementById('customUrl').value;
+      let url = document.getElementById('customUrl').value.trim();
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = 'https://' + url;
+        document.getElementById('customUrl').value = url;
+      }
       const expectedText = document.getElementById('customText').value;
       const panel = document.getElementById('executionPanel');
       const results = document.getElementById('resultsSection');

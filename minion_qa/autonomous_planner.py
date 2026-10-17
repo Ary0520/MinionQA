@@ -76,6 +76,12 @@ ACTION RULES:
 - "assert_total": Verify financial math. Specify "selector" with "subtotal,tax,discount" and "expected" with total.
 - "finish": The goal has been completely and successfully achieved. Specify "thought" with a summary.
 - "fail": An unrecoverable bug or missing feature was encountered. Specify "thought" with the reason.
+
+CRITICAL EXPLORATION RULES:
+- Do NOT invent or guess random external URLs (e.g. do NOT guess https://example.com/login or /actual-login).
+- Always inspect the INTERACTIVE DOM ELEMENTS currently visible on the page! If you see a 'Log In' link or button (e.g. `a:has-text("Log In")`), click it!
+- Do not repeatedly navigate to the same URL. If an action fails or the target cannot be reached, call "fail" with the explanation.
+- Always use the selectors given in the INTERACTIVE DOM ELEMENTS list whenever possible.
 """
 
 
@@ -278,14 +284,25 @@ class AutonomousGoalPlanner:
         """
         clear_assertion_history()
         start_time = time.time()
+
+        # Isolate session: reset browser to ensure clean page and no cross-site state pollution
+        reset_browser_session()
         browser = get_browser_session(headless=self.config.headless)
+
+        # Normalize start_url
+        clean_url = start_url.strip()
+        if not clean_url.startswith(("http://", "https://", "about:", "data:", "file://")):
+            if clean_url.startswith("localhost") or clean_url.startswith("127.0.0.1"):
+                clean_url = f"http://{clean_url}"
+            else:
+                clean_url = f"https://{clean_url}"
 
         console.print(
             Panel(
                 Text(
                     f"MinionQA Autonomous Goal Execution\n"
                     f"Goal: {goal}\n"
-                    f"Start URL: {start_url}\n"
+                    f"Start URL: {clean_url}\n"
                     f"Engine: {self.config.provider.upper()} ({self.config.model})\n"
                     f"Session ID: {self.session_id}",
                     style="bold green",
@@ -300,10 +317,57 @@ class AutonomousGoalPlanner:
         ]
 
         # Step 0: Initial Navigation
-        navigate_and_snapshot(start_url)
+        nav_res = browser.navigate(clean_url)
+        if nav_res.get("error") and isinstance(nav_res.get("error"), str):
+            fail_shot = browser.capture_failure_screenshot("fail_initial_nav.png")
+            err_detail = f"Could not navigate to target URL '{clean_url}': {nav_res.get('error')}"
+            fail_trace = PlannerStepTrace(
+                step_number=1,
+                thought=f"Attempted initial navigation to {clean_url}",
+                action="navigate",
+                selector=clean_url,
+                value=clean_url,
+                result=f"[FAILED] {err_detail}",
+                status="FAILED",
+                duration_s=round(time.time() - start_time, 2),
+                screenshot_path=fail_shot,
+            )
+            traces.append(fail_trace)
+            if on_step_callback:
+                on_step_callback(fail_trace)
+
+            report_md = compile_markdown_report(
+                test_name=f"Autonomous Goal: {goal[:40]}...",
+                run_summary=f"Autonomous run failed on initial navigation to {clean_url}: {err_detail}",
+                status="FAILED",
+                session_id=self.session_id,
+                target_url=clean_url,
+            )
+            out_filename = f"autonomous_qa_{int(time.time())}.md"
+            out_path = str(self.config.reports_dir / out_filename)
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(report_md)
+
+            return AutonomousPlanResult(
+                goal=goal,
+                target_url=clean_url,
+                status="FAILED",
+                total_steps=1,
+                duration_s=round(time.time() - start_time, 2),
+                session_id=self.session_id,
+                provider_used=self.config.provider,
+                model_used=self.config.model,
+                traces=traces,
+                assertions_count=0,
+                assertions_passed=0,
+                report_path=out_path,
+                screenshots=browser.captured_screenshots,
+                error_message=err_detail,
+            )
+
         initial_snapshot = browser.get_compact_dom()
         current_dom = initial_snapshot.get("elements_summary", "")
-        current_url = initial_snapshot.get("url", start_url)
+        current_url = initial_snapshot.get("url", clean_url)
         current_title = initial_snapshot.get("title", "")
 
         is_finished = False

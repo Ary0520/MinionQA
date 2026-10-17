@@ -92,8 +92,17 @@ class BrowserSession:
         page = self.ensure_started()
         start_time = time.time()
         
+        # Auto-normalize URL scheme if missing (e.g. dreamvault.netlify.app -> https://dreamvault.netlify.app)
+        target_url = url.strip()
+        if not target_url.startswith(("http://", "https://", "about:", "data:", "file://")):
+            if target_url.startswith("localhost") or target_url.startswith("127.0.0.1"):
+                target_url = f"http://{target_url}"
+            else:
+                target_url = f"https://{target_url}"
+
+        nav_error = None
         try:
-            page.goto(url, wait_until="load", timeout=default_config.timeout_ms)
+            page.goto(target_url, wait_until="load", timeout=default_config.timeout_ms)
             # Wait for networkidle so modern SPAs (Vite, Next.js, React) finish client hydration
             try:
                 page.wait_for_load_state("networkidle", timeout=4000)
@@ -102,34 +111,37 @@ class BrowserSession:
             # Short stabilization pause for dynamic DOM re-rendering
             page.wait_for_timeout(1000)
         except Exception as e:
-            # Fallback if timeout: still read current page
+            nav_error = str(e)
             self.console_logs.append({"type": "error", "text": f"Navigation timeout or error: {e}"})
 
         duration = round(time.time() - start_time, 2)
-        dom_html = page.content()
-        visible_text = self.get_visible_text()
-        interactive_elements = self._extract_interactive_elements(page)
+        dom_html = page.content() if not nav_error else ""
+        visible_text = self.get_visible_text() if not nav_error else ""
+        interactive_elements = self._extract_interactive_elements(page) if not nav_error else []
 
         shot_name = f"snapshot_{int(time.time())}"
-        shot_path = self.take_screenshot(shot_name)
+        shot_path = self.take_screenshot(shot_name, is_failure=bool(nav_error))
 
         step_record = {
             "action": "navigate",
             "url": page.url,
-            "target": url,
+            "target": target_url,
             "duration": duration,
-            "status": "success",
+            "status": "failed" if nav_error else "success",
+            "error": nav_error,
             "screenshot": shot_path,
         }
         self.step_history.append(step_record)
 
         return {
             "current_url": page.url,
-            "title": page.title(),
+            "target_url": target_url,
+            "title": page.title() if not nav_error else "Navigation Error",
             "interactive_elements": interactive_elements,
-            "visible_text_excerpt": visible_text[:1200],
+            "visible_text_excerpt": visible_text[:1200] if not nav_error else f"Failed to load URL {target_url}: {nav_error}",
             "console_errors_count": len([c for c in self.console_logs if c.get("type") == "error"]),
             "screenshot": shot_path,
+            "error": nav_error,
         }
 
     def execute_action(
