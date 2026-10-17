@@ -137,21 +137,28 @@ def evaluate_assertion(
 
     try:
         if a_type == "page_contains_text":
-            passed = target_clean.lower() in visible_text.lower()
+            raw_query = target_clean.strip('\'"')
+            norm_query = re.sub(r"\s+", " ", raw_query.lower()).strip()
+            norm_visible = re.sub(r"\s+", " ", (visible_text or "").lower())
+            norm_dom = re.sub(r"\s+", " ", (dom_html or "").lower())
+            passed = (norm_query in norm_visible) or (norm_query in norm_dom)
             result.passed = passed
             result.detail = (
-                f"Found text '{target_clean}' in page content."
+                f"Found text '{raw_query}' in page content."
                 if passed
-                else f"Text '{target_clean}' was NOT found in visible page content."
+                else f"Text '{raw_query}' was NOT found in visible page content."
             )
 
         elif a_type == "page_not_contains_text":
-            passed = target_clean.lower() not in visible_text.lower()
+            raw_query = target_clean.strip('\'"')
+            norm_query = re.sub(r"\s+", " ", raw_query.lower()).strip()
+            norm_visible = re.sub(r"\s+", " ", (visible_text or "").lower())
+            passed = norm_query not in norm_visible
             result.passed = passed
             result.detail = (
-                f"Text '{target_clean}' is correctly absent from page."
+                f"Text '{raw_query}' is correctly absent from page."
                 if passed
-                else f"Text '{target_clean}' was found on page but was expected to be absent."
+                else f"Text '{raw_query}' was found on page but was expected to be absent."
             )
 
         elif a_type == "url_contains":

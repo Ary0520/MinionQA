@@ -93,8 +93,13 @@ class BrowserSession:
         start_time = time.time()
         
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=default_config.timeout_ms)
-            # Short stabilization pause for SPA re-rendering
+            page.goto(url, wait_until="load", timeout=default_config.timeout_ms)
+            # Wait for networkidle so modern SPAs (Vite, Next.js, React) finish client hydration
+            try:
+                page.wait_for_load_state("networkidle", timeout=4000)
+            except Exception:
+                pass
+            # Short stabilization pause for dynamic DOM re-rendering
             page.wait_for_timeout(1000)
         except Exception as e:
             # Fallback if timeout: still read current page
@@ -102,7 +107,7 @@ class BrowserSession:
 
         duration = round(time.time() - start_time, 2)
         dom_html = page.content()
-        visible_text = extract_visible_text(dom_html)
+        visible_text = self.get_visible_text()
         interactive_elements = self._extract_interactive_elements(page)
 
         shot_name = f"snapshot_{int(time.time())}"
@@ -260,6 +265,13 @@ class BrowserSession:
         return self.page.content() if self.page else ""
 
     def get_visible_text(self) -> str:
+        if self.page:
+            try:
+                text = self.page.inner_text("body", timeout=2000)
+                if text and text.strip():
+                    return text
+            except Exception:
+                pass
         return extract_visible_text(self.get_dom_html())
 
     def get_console_errors(self) -> List[Dict[str, Any]]:
