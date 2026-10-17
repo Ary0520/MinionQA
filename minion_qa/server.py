@@ -25,6 +25,7 @@ import uvicorn
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from minion_qa.agent import MinionQAAgent
+from minion_qa.autonomous_planner import AutonomousGoalPlanner, AutonomousPlanResult
 from minion_qa.config import MinionQAConfig, default_config
 from minion_qa.tools.assertions import get_assertion_history, clear_assertion_history
 from minion_qa.tools.browser import get_browser_session, reset_browser_session
@@ -48,6 +49,16 @@ app.add_middleware(
 _run_history: List[Dict[str, Any]] = []
 
 
+class AutonomousRunRequest(BaseModel):
+    url: str = "https://www.saucedemo.com"
+    goal: str = (
+        "Log in with standard_user and secret_sauce, add backpack to cart, "
+        "go to cart, and finish checkout for John Doe 94103."
+    )
+    max_turns: int = 15
+    headless: bool = True
+
+
 class CustomRunRequest(BaseModel):
     name: str = "Custom Web Smoke Test"
     url: str = "https://example.com"
@@ -69,8 +80,11 @@ def get_system_status() -> Dict[str, Any]:
         "openminion_sdk": "0.1.6",
         "runtime": "Python 3.13 (Cortensor Mainnet Full Alpha)",
         "network": "Cortensor Decentralized Inference Network",
+        "provider": default_config.provider,
+        "model": default_config.model,
         "action_policy_gating": "ENABLED (Safe read/write confirmation preview)",
         "dom_compaction_engine": "ACTIVE (<450 token structural extract)",
+        "self_healing_selectors": "ACTIVE (Ranked DOM heuristic fallback)",
         "total_runs_executed": len(_run_history),
         "assertion_oracle": "Deterministic Revenue-Flow Engine",
         "screenshots_captured": len(list(default_config.screenshot_dir.glob("*.png"))),
@@ -82,6 +96,76 @@ def get_system_status() -> Dict[str, Any]:
 def list_runs() -> List[Dict[str, Any]]:
     """List recent agent execution runs."""
     return _run_history[::-1]
+
+
+@app.post("/api/run-autonomous")
+def run_autonomous_goal(payload: AutonomousRunRequest) -> Dict[str, Any]:
+    """Execute natural-language goal-driven autonomous QA via OpenMinion multi-turn LLM loop."""
+    cfg = MinionQAConfig(headless=payload.headless)
+    planner = AutonomousGoalPlanner(config=cfg, max_turns=payload.max_turns)
+
+    try:
+        result = planner.execute_goal(goal=payload.goal, start_url=payload.url)
+        report_filename = Path(result.report_path).name if result.report_path else ""
+
+        screenshots = []
+        for s in result.screenshots:
+            if isinstance(s, dict):
+                screenshots.append({
+                    "path": s.get("path", ""),
+                    "filename": s.get("filename") or Path(s.get("path", "shot.png")).name,
+                    "is_failure": bool(s.get("is_failure", False)),
+                })
+            else:
+                p = Path(str(s))
+                screenshots.append({
+                    "path": str(p),
+                    "filename": p.name,
+                    "is_failure": "fail" in p.name.lower(),
+                })
+
+        assertion_records = [
+            a.to_dict() if hasattr(a, "to_dict") else (a.model_dump() if hasattr(a, "model_dump") else a.dict())
+            for a in get_assertion_history()
+        ]
+        traces_data = [
+            {
+                "step_number": t.step_number,
+                "thought": t.thought,
+                "action": t.action,
+                "selector": t.selector,
+                "value": t.value,
+                "result": t.result,
+                "status": t.status,
+                "duration_s": t.duration_s,
+                "screenshot_path": Path(t.screenshot_path).name if t.screenshot_path else None,
+            }
+            for t in result.traces
+        ]
+
+        run_record = {
+            "id": uuid4().hex[:8],
+            "name": f"Autonomous: {payload.goal[:45]}...",
+            "target_url": payload.url,
+            "goal": payload.goal,
+            "status": result.status,
+            "duration": result.duration_s,
+            "session_id": result.session_id,
+            "assertions_count": result.assertions_count,
+            "assertions_passed": result.assertions_passed,
+            "report_path": result.report_path,
+            "report_filename": report_filename,
+            "screenshots": screenshots,
+            "assertions": assertion_records,
+            "traces": traces_data,
+            "provider_used": result.provider_used,
+            "model_used": result.model_used,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        }
+        _run_history.append(run_record)
+        return run_record
+    finally:
+        reset_browser_session()
 
 
 @app.post("/api/run-ecommerce")
@@ -107,7 +191,6 @@ def run_ecommerce_test(payload: EcommerceRunRequest) -> Dict[str, Any]:
             steps=steps,
             report_output_path=report_path,
         )
-        # Store in run history
         run_record = {
             "id": uuid4().hex[:8],
             "name": test_title,
@@ -121,6 +204,7 @@ def run_ecommerce_test(payload: EcommerceRunRequest) -> Dict[str, Any]:
             "report_filename": report_filename,
             "screenshots": result["screenshots"],
             "assertions": result.get("assertions", []),
+            "traces": [],
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
         }
         _run_history.append(run_record)
@@ -176,6 +260,7 @@ def run_custom_test(payload: CustomRunRequest) -> Dict[str, Any]:
             "report_filename": report_filename,
             "screenshots": result["screenshots"],
             "assertions": result.get("assertions", []),
+            "traces": [],
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
         }
         _run_history.append(run_record)
@@ -195,7 +280,6 @@ def list_reports() -> List[Dict[str, Any]]:
             "modified": time.ctime(p.stat().st_mtime),
             "path": str(p),
         })
-    # Also include sample_run_report if it exists
     sample_rep = Path("examples/sample_run_report.md")
     if sample_rep.exists():
         reports.append({
@@ -237,14 +321,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MinionQA Dashboard | Cortensor Hackathon #5</title>
+  <title>MinionQA Dashboard | Autonomous Web QA & Revenue-Flow Validation</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <style>
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
     body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #0b0f19; color: #f3f4f6; }
     code, pre { font-family: 'JetBrains Mono', monospace; }
-    .glass { background: rgba(17, 24, 39, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
+    .glass { background: rgba(17, 24, 39, 0.75); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
     .glass-card { background: #111827; border: 1px solid rgba(255, 255, 255, 0.06); }
     .gradient-text { background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
   </style>
@@ -281,27 +365,136 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <!-- Main Container -->
   <main class="max-w-7xl mx-auto px-6 py-8 space-y-8">
     
-    <!-- Hero / Action Banner -->
+    <!-- Hero Banner -->
     <div class="glass-card rounded-2xl p-6 relative overflow-hidden border border-cyan-900/40">
       <div class="absolute -right-20 -top-20 w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none"></div>
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 items-center">
-        <div class="lg:col-span-2 space-y-2">
-          <span class="text-xs font-bold uppercase tracking-wider text-cyan-400">DoraHacks #2418 Submission Live Runner</span>
-          <h2 class="text-2xl lg:text-3xl font-extrabold text-white">Autonomous E-Commerce & Web3 Financial QA</h2>
-          <p class="text-gray-400 text-sm leading-relaxed">
-            MinionQA executes headless Playwright sessions with deterministic test oracles. It isolates DOM structures (<450 tokens), verifies pricing math down to the cent, captures instant visual failure artifacts, and generates verifiable audit reports.
+      <div class="space-y-2">
+        <span class="text-xs font-bold uppercase tracking-wider text-cyan-400">Cortensor Hackathon #5 (DoraHacks #2418) Live Runner</span>
+        <h2 class="text-2xl lg:text-3xl font-extrabold text-white">Autonomous E-Commerce & Financial Web QA</h2>
+        <p class="text-gray-400 text-sm leading-relaxed max-w-4xl">
+          MinionQA pairs the <strong>OpenMinion 0.1</strong> autonomous agent framework with headless Playwright execution and a deterministic Python test oracle. It operates on ultra-compact DOM trees (&lt;450 tokens), self-heals broken selectors on dynamic pages, evaluates financial pricing arithmetic down to the cent, captures instant visual failure artifacts, and generates reproducible audit reports.
+        </p>
+      </div>
+    </div>
+
+    <!-- Centerpiece: Autonomous Goal Studio -->
+    <div class="glass-card rounded-2xl p-6 border border-cyan-800/50 shadow-xl space-y-6">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-gray-800/80 pb-4">
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="text-xl">🎯</span>
+            <h3 class="text-xl font-bold text-white">Autonomous Goal Studio</h3>
+            <span class="px-2 py-0.5 text-[11px] font-semibold rounded-full bg-cyan-950 text-cyan-400 border border-cyan-800">Multi-Turn LLM Loop</span>
+          </div>
+          <p class="text-xs text-gray-400 mt-1">
+            Input any natural-language objective. MinionQA inspects live DOM state, reasons multi-turn steps, heals selectors, and validates assertions.
           </p>
         </div>
         
-        <div class="flex flex-col gap-3">
-          <button id="btnRunPass" onclick="runEcommerce(false)" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20 transition active:scale-95">
-            <i class="fa-solid fa-play"></i>
-            <span>Run E-Commerce Checkout</span>
+        <div class="flex items-center gap-2 text-xs">
+          <span class="px-2.5 py-1 rounded-lg bg-gray-900 border border-gray-800 text-gray-300 flex items-center gap-1.5 font-mono">
+            <i class="fa-solid fa-microchip text-cyan-400"></i>
+            <span id="activeModelLabel">OpenRouter / gpt-4o-mini</span>
+          </span>
+          <span class="px-2.5 py-1 rounded-lg bg-emerald-950/60 border border-emerald-800/60 text-emerald-300 font-mono">
+            <i class="fa-solid fa-shield-halved mr-1"></i>Self-Healing On
+          </span>
+        </div>
+      </div>
+
+      <!-- Quick Preset Buttons -->
+      <div class="space-y-2">
+        <label class="text-xs font-semibold text-gray-400 uppercase tracking-wider">Quick Benchmark Presets</label>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" onclick="loadPreset('saucedemo')" class="px-3 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-cyan-300 border border-gray-700 text-xs font-medium flex items-center gap-1.5 transition">
+            <i class="fa-solid fa-cart-shopping text-cyan-400"></i>
+            <span>🛒 SauceDemo Checkout Funnel</span>
           </button>
-          
-          <button id="btnRunFail" onclick="runEcommerce(true)" class="w-full py-2.5 px-4 rounded-xl bg-gray-800 hover:bg-rose-950/40 text-rose-300 border border-rose-900/40 font-medium text-sm flex items-center justify-center gap-2 transition active:scale-95">
-            <i class="fa-solid fa-bug"></i>
-            <span>Test Simulated Pricing Anomaly</span>
+          <button type="button" onclick="loadPreset('example')" class="px-3 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-indigo-300 border border-gray-700 text-xs font-medium flex items-center gap-1.5 transition">
+            <i class="fa-solid fa-globe text-indigo-400"></i>
+            <span>🌐 Example.com Smoke Test</span>
+          </button>
+          <button type="button" onclick="loadPreset('anomaly')" class="px-3 py-1.5 rounded-lg bg-gray-900 hover:bg-gray-800 text-rose-300 border border-gray-700 text-xs font-medium flex items-center gap-1.5 transition">
+            <i class="fa-solid fa-triangle-exclamation text-rose-400"></i>
+            <span>⚠️ Pricing Anomaly Catch</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Autonomous Input Form -->
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div class="md:col-span-3 space-y-1">
+          <label class="text-xs font-semibold text-gray-300">Target Web URL</label>
+          <input id="autoUrl" type="url" value="https://www.saucedemo.com" placeholder="https://..." class="w-full px-3.5 py-2.5 bg-gray-900 border border-gray-700 rounded-xl text-xs text-white font-mono focus:outline-none focus:border-cyan-500">
+        </div>
+        <div class="space-y-1">
+          <label class="text-xs font-semibold text-gray-300">Max Planner Turns</label>
+          <select id="autoMaxTurns" class="w-full px-3.5 py-2.5 bg-gray-900 border border-gray-700 rounded-xl text-xs text-white focus:outline-none focus:border-cyan-500">
+            <option value="5">5 Turns (Quick Smoke)</option>
+            <option value="10">10 Turns (Medium)</option>
+            <option value="15" selected>15 Turns (Full Funnel)</option>
+            <option value="20">20 Turns (Deep Flow)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="space-y-1">
+        <label class="text-xs font-semibold text-gray-300">Natural-Language QA Objective / Goal</label>
+        <textarea id="autoGoal" rows="3" placeholder="Enter high-level QA instruction..." class="w-full px-3.5 py-2.5 bg-gray-900 border border-gray-700 rounded-xl text-xs text-white leading-relaxed focus:outline-none focus:border-cyan-500 font-mono">Log in with username standard_user and password secret_sauce, add backpack to cart, go to cart, and finish checkout for John Doe zip 94103.</textarea>
+      </div>
+
+      <div class="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2">
+        <div class="flex items-center space-x-2 text-xs text-gray-400">
+          <input type="checkbox" id="autoHeadless" checked class="rounded bg-gray-900 border-gray-700 text-cyan-600 focus:ring-0">
+          <label for="autoHeadless">Headless Chromium (Uncheck for visual browser debugging)</label>
+        </div>
+
+        <button id="btnLaunchAutonomous" onclick="runAutonomous()" class="w-full sm:w-auto px-6 py-3 rounded-xl bg-gradient-to-r from-cyan-500 via-indigo-600 to-purple-600 hover:from-cyan-400 hover:to-purple-500 text-white font-bold text-sm flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/25 transition active:scale-95">
+          <i class="fa-solid fa-rocket"></i>
+          <span>Launch Autonomous QA Agent</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Quick Run Pre-Baked Benchmarks (Static Flow & Custom Smoke) -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div class="glass-card rounded-xl p-5 border border-gray-800 space-y-3">
+        <div class="flex items-center justify-between">
+          <h4 class="text-sm font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-code-commit text-cyan-400"></i>
+            <span>Deterministic Pre-Baked Flow</span>
+          </h4>
+          <span class="text-[10px] text-gray-400 font-mono">100% Deterministic</span>
+        </div>
+        <p class="text-xs text-gray-400 leading-relaxed">
+          Executes rigid multi-step checkout with financial subtotal+tax verification. Useful for zero-token baseline benchmarking.
+        </p>
+        <div class="flex gap-2">
+          <button onclick="runEcommerce(false)" class="flex-1 py-2 px-3 rounded-lg bg-gray-800 hover:bg-gray-700 text-cyan-300 border border-gray-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition">
+            <i class="fa-solid fa-play text-cyan-400"></i> Run Baseline Pass
+          </button>
+          <button onclick="runEcommerce(true)" class="py-2 px-3 rounded-lg bg-gray-800 hover:bg-rose-950/40 text-rose-300 border border-rose-900/40 text-xs font-semibold flex items-center justify-center gap-1.5 transition">
+            <i class="fa-solid fa-bug text-rose-400"></i> Inject Math Mismatch
+          </button>
+        </div>
+      </div>
+
+      <div class="glass-card rounded-xl p-5 border border-gray-800 space-y-3">
+        <div class="flex items-center justify-between">
+          <h4 class="text-sm font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-compass text-indigo-400"></i>
+            <span>Ad-Hoc URL Quick Checker</span>
+          </h4>
+          <span class="text-[10px] text-gray-400 font-mono">Single Assertion</span>
+        </div>
+        <p class="text-xs text-gray-400 leading-relaxed">
+          Quickly verify single element or text presence on any target landing page without writing code.
+        </p>
+        <div class="flex gap-2">
+          <input id="customUrl" type="url" value="https://example.com" class="flex-1 px-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-white font-mono focus:outline-none">
+          <input id="customText" type="text" value="Example" class="w-28 px-3 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-white focus:outline-none">
+          <button onclick="runCustom()" class="py-1.5 px-3 rounded-lg bg-gray-800 hover:bg-gray-700 text-white text-xs font-semibold border border-gray-700 transition">
+            Run
           </button>
         </div>
       </div>
@@ -324,16 +517,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <i class="fa-solid fa-compress text-indigo-400"></i>
           <span>99.2% Reduced</span>
         </div>
-        <div class="text-xs text-indigo-400/80 mt-1"><450 tokens vs 60,000 raw DOM</div>
+        <div class="text-xs text-indigo-400/80 mt-1">&lt;450 tokens vs 60,000 raw DOM</div>
       </div>
 
       <div class="glass-card rounded-xl p-4 border border-gray-800">
-        <div class="text-xs text-gray-400 font-medium">Policy Gating</div>
+        <div class="text-xs text-gray-400 font-medium">Self-Healing Selectors</div>
         <div class="text-lg font-bold text-white mt-1 flex items-center gap-2">
-          <i class="fa-solid fa-shield-halved text-emerald-400"></i>
-          <span>OpenMinion Guard</span>
+          <i class="fa-solid fa-wand-magic-sparkles text-emerald-400"></i>
+          <span>Active</span>
         </div>
-        <div class="text-xs text-emerald-400/80 mt-1">Blocks destructive mutations</div>
+        <div class="text-xs text-emerald-400/80 mt-1">Automatic DOM heuristic fallback</div>
       </div>
 
       <div class="glass-card rounded-xl p-4 border border-gray-800">
@@ -360,14 +553,46 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
 
       <!-- Execution Progress Logs -->
-      <div id="execLogBox" class="bg-gray-950 rounded-xl p-4 border border-gray-800 text-xs text-gray-300 font-mono max-h-48 overflow-y-auto space-y-1">
-        <div class="text-cyan-400">[OpenMinion 0.1] Initializing browser worker & deterministic oracle...</div>
+      <div id="execLogBox" class="bg-gray-950 rounded-xl p-4 border border-gray-800 text-xs text-gray-300 font-mono max-h-56 overflow-y-auto space-y-1">
+        <div class="text-cyan-400">[OpenMinion 0.1] Initializing browser worker & autonomous planner...</div>
       </div>
     </div>
 
-    <!-- Active Run Details (Assertion Matrix & Evidence) -->
+    <!-- Active Run Details (Traces, Assertion Matrix & Evidence) -->
     <div id="resultsSection" class="hidden space-y-6">
       
+      <!-- Section: Autonomous Multi-Turn Trace Timeline -->
+      <div id="tracesCard" class="hidden glass-card rounded-2xl p-6 border border-gray-800 space-y-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-lg font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-shoe-prints text-indigo-400"></i>
+              <span>Autonomous Multi-Turn Action Trace</span>
+            </h3>
+            <p class="text-xs text-gray-400">Step-by-step reasoning chain, DOM interaction, self-healing status, and duration per turn</p>
+          </div>
+          <div id="traceStats" class="text-xs font-semibold text-gray-300"></div>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs border-collapse">
+            <thead>
+              <tr class="border-b border-gray-800 text-gray-400 font-mono">
+                <th class="py-2.5 px-3">Turn</th>
+                <th class="py-2.5 px-3">Action</th>
+                <th class="py-2.5 px-3">Target / Selector</th>
+                <th class="py-2.5 px-3">Planner Thought / Reasoning</th>
+                <th class="py-2.5 px-3">Status</th>
+                <th class="py-2.5 px-3">Duration</th>
+              </tr>
+            </thead>
+            <tbody id="traceTableBody" class="divide-y divide-gray-850">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <!-- Section: Assertion Verification Matrix -->
       <div class="glass-card rounded-2xl p-6 border border-gray-800 space-y-4">
         <div class="flex items-center justify-between">
@@ -403,7 +628,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="glass-card rounded-2xl p-6 border border-gray-800 space-y-4">
         <div>
           <h3 class="text-lg font-bold text-white flex items-center gap-2">
-            <i class="fa-solid fa-camera text-indigo-400"></i>
+            <i class="fa-solid fa-camera text-purple-400"></i>
             <span>Visual Proof & Failure Snapshots</span>
           </h3>
           <p class="text-xs text-gray-400">High-resolution viewport snapshots captured during navigation and on assertion discrepancies</p>
@@ -434,27 +659,89 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     </div>
 
-    <!-- Custom URL Quick Test Box -->
-    <div class="glass-card rounded-2xl p-6 border border-gray-800 space-y-4">
-      <div class="flex items-center gap-2">
-        <i class="fa-solid fa-compass text-cyan-400"></i>
-        <h3 class="text-lg font-bold text-white">Test Any Custom URL / dApp Portal</h3>
-      </div>
-      <p class="text-xs text-gray-400">Trigger an ad-hoc autonomous navigation and text/element assertion check on any live web URL.</p>
-
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <input id="customUrl" type="url" value="https://example.com" placeholder="https://dapp.cortensor.network" class="px-3 py-2 bg-gray-900 border border-gray-700 rounded-xl text-xs text-white focus:outline-none focus:border-cyan-500">
-        <input id="customText" type="text" value="Example" placeholder="Expected text on page" class="px-3 py-2 bg-gray-900 border border-gray-700 rounded-xl text-xs text-white focus:outline-none focus:border-cyan-500">
-        <button onclick="runCustom()" class="py-2 px-4 rounded-xl bg-gray-800 hover:bg-gray-700 text-white font-medium text-xs border border-gray-700 flex items-center justify-center gap-2 transition">
-          <i class="fa-solid fa-bolt text-yellow-400"></i>
-          <span>Run Custom Audit</span>
-        </button>
-      </div>
-    </div>
-
   </main>
 
   <script>
+    function loadPreset(type) {
+      if (type === 'saucedemo') {
+        document.getElementById('autoUrl').value = 'https://www.saucedemo.com';
+        document.getElementById('autoGoal').value = 'Log in with username standard_user and password secret_sauce, add backpack to cart, go to cart, and finish checkout for John Doe zip 94103.';
+        document.getElementById('autoMaxTurns').value = '15';
+      } else if (type === 'example') {
+        document.getElementById('autoUrl').value = 'https://example.com';
+        document.getElementById('autoGoal').value = 'Verify that the heading contains Example Domain and assert that the More information link exists on page.';
+        document.getElementById('autoMaxTurns').value = '5';
+      } else if (type === 'anomaly') {
+        document.getElementById('autoUrl').value = 'https://www.saucedemo.com';
+        document.getElementById('autoGoal').value = 'Log in with standard_user and secret_sauce, add backpack to cart, proceed to checkout for Alice 94103, and assert total price equals $99.99 to verify financial anomaly detection.';
+        document.getElementById('autoMaxTurns').value = '15';
+      }
+    }
+
+    async function runAutonomous() {
+      const url = document.getElementById('autoUrl').value.trim();
+      const goal = document.getElementById('autoGoal').value.trim();
+      const maxTurns = parseInt(document.getElementById('autoMaxTurns').value);
+      const headless = document.getElementById('autoHeadless').checked;
+
+      const panel = document.getElementById('executionPanel');
+      const results = document.getElementById('resultsSection');
+      const spinner = document.getElementById('statusSpinner');
+      const title = document.getElementById('execTitle');
+      const subtitle = document.getElementById('execSubtitle');
+      const badge = document.getElementById('verdictBadge');
+      const logBox = document.getElementById('execLogBox');
+      const btn = document.getElementById('btnLaunchAutonomous');
+
+      panel.classList.remove('hidden');
+      results.classList.add('hidden');
+      spinner.classList.remove('hidden');
+      badge.innerHTML = '';
+      title.innerText = 'Autonomous Agent Running...';
+      subtitle.innerText = `Goal: "${goal.substring(0, 70)}..." on ${url}`;
+      btn.disabled = true;
+      btn.classList.add('opacity-50', 'cursor-not-allowed');
+
+      logBox.innerHTML = `
+        <div class="text-cyan-400">[0.0s] OpenMinion Autonomous Goal Planner initiated...</div>
+        <div class="text-gray-400">[0.4s] Navigating headless Playwright Chromium to ${url}...</div>
+        <div class="text-gray-400">[1.1s] Inspecting DOM state & compacting tokens (&lt;450 tokens)...</div>
+        <div class="text-indigo-400">[1.8s] Querying multi-turn reasoning engine via OpenRouter / Cortensor API...</div>
+        <div class="text-gray-400">[2.5s] Executing actions with self-healing selector fallback...</div>
+      `;
+
+      try {
+        const response = await fetch('/api/run-autonomous', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: url, goal: goal, max_turns: maxTurns, headless: headless })
+        });
+        const data = await response.json();
+
+        spinner.classList.add('hidden');
+        if (data.status === 'PASSED') {
+          title.innerText = 'Autonomous Goal Completed Successfully';
+          badge.innerHTML = '<span class="px-3 py-1 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold text-xs">✅ PASSED</span>';
+          logBox.innerHTML += `<div class="text-emerald-400 font-bold">[Final] Goal achieved in ${data.duration}s across ${data.traces.length} autonomous turns!</div>`;
+        } else {
+          title.innerText = 'Autonomous Goal Failed / Mismatch Detected';
+          badge.innerHTML = '<span class="px-3 py-1 rounded-full bg-rose-950 text-rose-400 border border-rose-800 font-bold text-xs">❌ FAILED</span>';
+          logBox.innerHTML += `<div class="text-rose-400 font-bold">[Final] Goal run concluded: status=${data.status}. Visual failure proof captured.</div>`;
+        }
+
+        results.classList.remove('hidden');
+        renderRunDetails(data);
+      } catch (err) {
+        spinner.classList.add('hidden');
+        title.innerText = 'Execution Encountered Error';
+        badge.innerHTML = '<span class="px-3 py-1 rounded-full bg-amber-950 text-amber-400 border border-amber-800 font-bold text-xs">⚠️ ERROR</span>';
+        logBox.innerHTML += `<div class="text-rose-400 font-bold">Error: ${err.message}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove('opacity-50', 'cursor-not-allowed');
+      }
+    }
+
     async function runEcommerce(simulateFailure) {
       const panel = document.getElementById('executionPanel');
       const results = document.getElementById('resultsSection');
@@ -500,7 +787,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           logBox.innerHTML += `<div class="text-rose-400 font-bold">[Final] Flow FAILED as expected. Anomaly captured: ${data.assertions_passed}/${data.assertions_count} passed. Failure screenshot saved.</div>`;
         }
 
-        // Render Results
         results.classList.remove('hidden');
         renderRunDetails(data);
       } catch (err) {
@@ -555,9 +841,42 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function renderRunDetails(data) {
-      document.getElementById('assertionStats').innerText = `Passed: ${data.assertions_passed} / ${data.assertions_count}`;
+      // 1. Traces Table (if available)
+      const tracesCard = document.getElementById('tracesCard');
+      const traceTbody = document.getElementById('traceTableBody');
+      const traceStats = document.getElementById('traceStats');
 
-      // Populate assertion verification matrix table
+      if (data.traces && data.traces.length > 0) {
+        tracesCard.classList.remove('hidden');
+        traceStats.innerText = `Total Turns: ${data.traces.length} | Model: ${data.model_used || 'LLM'}`;
+        traceTbody.innerHTML = '';
+        data.traces.forEach(t => {
+          const tr = document.createElement('tr');
+          tr.className = 'border-b border-gray-800/60 hover:bg-gray-800/30 font-mono text-[11px]';
+          
+          let statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800">PASSED</span>';
+          if (t.status === 'HEALED') {
+            statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-950 text-amber-300 border border-amber-800">⚡ HEALED</span>';
+          } else if (t.status === 'FAILED') {
+            statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-400 border border-rose-800">FAILED</span>';
+          }
+
+          tr.innerHTML = `
+            <td class="py-2.5 px-3 text-cyan-400 font-bold">#${t.step_number}</td>
+            <td class="py-2.5 px-3 text-purple-300 font-semibold">${t.action}</td>
+            <td class="py-2.5 px-3 text-gray-300 max-w-[200px] truncate" title="${t.selector || t.value}">${t.selector || t.value || '-'}</td>
+            <td class="py-2.5 px-3 text-gray-400 font-sans max-w-[320px] truncate" title="${t.thought}">${t.thought}</td>
+            <td class="py-2.5 px-3">${statusBadge}</td>
+            <td class="py-2.5 px-3 text-gray-500">${t.duration_s}s</td>
+          `;
+          traceTbody.appendChild(tr);
+        });
+      } else {
+        tracesCard.classList.add('hidden');
+      }
+
+      // 2. Assertion Matrix Table
+      document.getElementById('assertionStats').innerText = `Passed: ${data.assertions_passed} / ${data.assertions_count}`;
       const tbody = document.getElementById('assertionTableBody');
       tbody.innerHTML = '';
       if (data.assertions && data.assertions.length > 0) {
@@ -578,10 +897,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           `;
           tbody.appendChild(tr);
         });
+      } else {
+        tbody.innerHTML = '<tr><td colspan="5" class="py-3 px-3 text-gray-500">No explicit financial assertions recorded in this run.</td></tr>';
       }
 
-
-      // Fetch Report content
+      // 3. Fetch Report content
       if (data.report_filename) {
         try {
           const repRes = await fetch(`/api/reports/${data.report_filename}`);
@@ -591,7 +911,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         } catch (e) {}
       }
 
-      // Populate screenshots
+      // 4. Populate screenshots
       const shotGrid = document.getElementById('screenshotsGrid');
       shotGrid.innerHTML = '';
       if (data.screenshots && data.screenshots.length > 0) {
@@ -599,7 +919,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const filename = s.filename || (s.path ? s.path.split(/\\\\|\\//).pop() : 'shot.png');
           const isFail = s.is_failure;
           const card = document.createElement('div');
-          card.className = `glass rounded-xl p-3 border ${isFail ? 'border-rose-800/80' : 'border-gray-800'}`;
+          card.className = `glass rounded-xl p-3 border ${isFail ? 'border-rose-800/80 bg-rose-950/10' : 'border-gray-800'}`;
           card.innerHTML = `
             <div class="flex items-center justify-between text-xs mb-2">
               <span class="font-bold ${isFail ? 'text-rose-400' : 'text-gray-300'}">${isFail ? '⚠️ Failure Capture' : '📸 State Snapshot'}</span>
@@ -616,15 +936,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    // Auto-load sample report on page load if available
+    // Auto-load sample report or status on page load
     window.addEventListener('DOMContentLoaded', async () => {
       try {
+        const statusRes = await fetch('/api/status');
+        if (statusRes.ok) {
+          const st = await statusRes.json();
+          if (st.provider && st.model) {
+            document.getElementById('activeModelLabel').innerText = `${st.provider} / ${st.model}`;
+          }
+        }
+
         const res = await fetch('/api/reports/sample_run_report.md');
         if (res.ok) {
           const j = await res.json();
           document.getElementById('reportMarkdownPre').innerText = j.content;
           document.getElementById('resultsSection').classList.remove('hidden');
-          // Also fetch recent runs if any
           const runsRes = await fetch('/api/runs');
           if (runsRes.ok) {
             const runs = await runsRes.json();

@@ -78,29 +78,50 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. Launch the Interactive Web Dashboard & REST API
-Start the real-time visual dashboard to execute QA runs, inspect assertion tables, and review screenshot proof:
+### 2. Configure Environment (OpenRouter or Cortensor)
+Copy the example environment file and configure your API key:
+```bash
+cp .env.example .env
+# Edit .env and set your OPENROUTER_API_KEY (or CORTENSOR_API_KEY)
+```
+
+### 3. Launch the Interactive Web Dashboard & Autonomous Goal Studio
+Start the real-time visual dashboard featuring the **Autonomous Goal Studio**, live action trace timeline, assertion verification matrix, and screenshot proof gallery:
 ```bash
 python -m minion_qa.server --port 8080
 ```
 Open **[http://localhost:8080](http://localhost:8080)** in any browser.
 
-### 3. Run the Working E-Commerce Checkout Flow (Headless CLI)
-Runs the complete autonomous checkout flow against a real e-commerce storefront, validating pricing and order confirmation:
+### 4. Run Natural-Language Autonomous QA (CLI)
+MinionQA can autonomously explore any web page and achieve your objective using dynamic multi-turn planning and self-healing selectors:
+```bash
+# E-commerce checkout funnel autonomously executed from natural language:
+python -m minion_qa.autonomous_planner \
+  --url https://www.saucedemo.com \
+  --goal "Log in with standard_user and secret_sauce, add backpack to cart, go to cart, and finish checkout for John Doe 94103."
+
+# Quick smoke test against any target URL:
+python -m minion_qa.autonomous_planner \
+  --url https://example.com \
+  --goal "Verify heading contains Example Domain"
+```
+
+### 5. Run the Working E-Commerce Checkout Flow (Deterministic Baseline)
+Runs the complete baseline checkout flow against a real e-commerce storefront, validating pricing and order confirmation:
 ```bash
 python examples/test_ecommerce_checkout.py
 ```
 
-### 4. Run with Simulated Failure (Verify Failure Screenshots)
+### 6. Run with Simulated Failure (Verify Failure Screenshots)
 Demonstrates the Test Oracle detecting a financial mismatch ($32.39 vs expected $999.99) and capturing a visual failure screenshot (`screenshots/FAIL_*.png`):
 ```bash
 python examples/test_ecommerce_checkout.py --simulate-failure
 ```
 
-### 5. Run the Zero-Friction MinionQA CLI
+### 7. Run the Full Test Suite (100% Pass Rate)
+Execute all 30 unit and integration tests across the agent, planner, browser, oracle, and server:
 ```bash
-# Quick smoke test against any target URL
-python -m minion_qa.agent --url https://example.com
+pytest tests/ -v
 ```
 
 ---

@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+
+# Automatically load environment variables from .env file
+load_dotenv()
+
 
 @dataclass
 class MinionQAConfig:
@@ -25,12 +30,18 @@ class MinionQAConfig:
     screenshot_dir: Path = field(default_factory=lambda: Path("./screenshots"))
     reports_dir: Path = field(default_factory=lambda: Path("./reports"))
 
-    # Provider & Model Settings (Cortensor / Local / Hybrid)
+    # Provider & Model Settings (Cortensor / OpenRouter / OpenAI)
     provider: str = field(
-        default_factory=lambda: os.getenv("MINIONQA_PROVIDER", "cortensor")
+        default_factory=lambda: os.getenv("MINIONQA_PROVIDER", "openrouter")
     )
     model: str = field(
-        default_factory=lambda: os.getenv("MINIONQA_MODEL", "gpt-oss-20b")
+        default_factory=lambda: os.getenv("MINIONQA_MODEL", "openai/gpt-4o-mini")
+    )
+    openrouter_api_key: Optional[str] = field(
+        default_factory=lambda: os.getenv("OPENROUTER_API_KEY")
+    )
+    openai_api_key: Optional[str] = field(
+        default_factory=lambda: os.getenv("OPENAI_API_KEY")
     )
     cortensor_api_key: Optional[str] = field(
         default_factory=lambda: os.getenv("CORTENSOR_API_KEY")

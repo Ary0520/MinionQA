@@ -277,6 +277,27 @@ class BrowserSession:
     def get_console_errors(self) -> List[Dict[str, Any]]:
         return [c for c in self.console_logs if c.get("type") == "error"]
 
+    def get_compact_dom(self) -> Dict[str, Any]:
+        """Extract current page compact DOM snapshot for LLM reasoning."""
+        page = self.ensure_started()
+        elems = self._extract_interactive_elements(page)
+        elem_summary = "\n".join(
+            [f"- [{e.get('index')}] <{e.get('tag')}> '{e.get('text')}' (selector: `{e.get('selector')}`)"
+             for e in elems[:30]]
+        )
+        return {
+            "url": page.url,
+            "title": page.title(),
+            "elements": elems,
+            "elements_summary": elem_summary or "- No interactive elements detected",
+            "visible_text": self.get_visible_text()[:1500],
+        }
+
+    def capture_failure_screenshot(self, name: str = "failure") -> str:
+        """Capture and record failure screenshot with FAIL_ prefix."""
+        clean_name = name.replace(".png", "")
+        return self.take_screenshot(clean_name, is_failure=True)
+
     def close(self) -> None:
         """Clean up Playwright processes."""
         try:

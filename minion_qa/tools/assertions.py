@@ -27,6 +27,9 @@ class AssertionResult(BaseModel):
     passed: bool
     detail: str
 
+    def to_dict(self) -> dict:
+        return self.model_dump() if hasattr(self, "model_dump") else self.dict()
+
 
 # Session assertion tracker to store results during an agent run
 _session_assertion_history: List[AssertionResult] = []
@@ -137,7 +140,7 @@ def evaluate_assertion(
 
     try:
         if a_type == "page_contains_text":
-            raw_query = target_clean.strip('\'"')
+            raw_query = (target_clean or exp_clean).strip('\'"')
             norm_query = re.sub(r"\s+", " ", raw_query.lower()).strip()
             norm_visible = re.sub(r"\s+", " ", (visible_text or "").lower())
             norm_dom = re.sub(r"\s+", " ", (dom_html or "").lower())

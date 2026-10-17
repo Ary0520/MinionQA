@@ -8,6 +8,11 @@ __pycache__/
 venv/
 ENV/
 
+# Environment variables & API keys
+.env
+*.env
+.env.local
+
 # OpenMinion local database & runtime state
 .openminion/
 
