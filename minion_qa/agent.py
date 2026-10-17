@@ -212,6 +212,7 @@ class MinionQAAgent:
             "session_id": self.session_id,
             "assertions_count": len(assertions),
             "assertions_passed": sum(1 for a in assertions if a.passed),
+            "assertions": [a.model_dump() if hasattr(a, "model_dump") else a.dict() for a in assertions],
             "report_path": out_file,
             "screenshots": browser.captured_screenshots,
         }
