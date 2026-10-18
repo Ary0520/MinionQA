@@ -423,6 +423,13 @@ def create_canary_target(payload: CanaryTargetCreate) -> Dict[str, Any]:
         }
 
 
+@app.get("/api/locators")
+def get_locators(target_id: Optional[int] = Query(None)) -> List[Dict[str, Any]]:
+    """Retrieve durable learned locators and self-healing memory."""
+    from minion_qa.memory import list_learned_locators
+    return list_learned_locators(target_id=target_id)
+
+
 @app.post("/api/run-autonomous")
 def run_autonomous_goal(payload: AutonomousRunRequest) -> Dict[str, Any]:
     """Execute natural-language goal-driven autonomous QA via OpenMinion multi-turn LLM loop."""

@@ -31,6 +31,7 @@ from rich.table import Table
 from rich.text import Text
 
 from minion_qa.config import MinionQAConfig, default_config
+from minion_qa.memory import lookup_locator, remember_locator
 from minion_qa.tools.assertions import (
     clear_assertion_history,
     get_assertion_history,
@@ -468,17 +469,30 @@ class AutonomousGoalPlanner:
                     step_result = f"Navigated to {target}"
 
                 elif action in ("click", "fill", "select", "wait"):
-                    res = execute_action(action, selector, value)
+                    # Check durable memory first for previously healed selector
+                    resolved_selector = lookup_locator(selector, current_url) if selector else None
+                    effective_selector = resolved_selector or selector
+                    if resolved_selector and resolved_selector != selector:
+                        logger.info("Using durable learned locator '%s' instead of broken '%s'", resolved_selector, selector)
+
+                    res = execute_action(action, effective_selector, value)
                     if "[FAILED]" in res:
                         # Attempt Leaka AI-style Self-Healing
-                        healed_selector = self._self_heal_selector(selector, current_dom, action)
-                        if healed_selector and healed_selector != selector:
-                            logger.info(f"Self-healing selector from '{selector}' to '{healed_selector}'")
+                        healed_selector = self._self_heal_selector(effective_selector, current_dom, action)
+                        if healed_selector and healed_selector != effective_selector:
+                            logger.info(f"Self-healing selector from '{effective_selector}' to '{healed_selector}'")
                             res_healed = execute_action(action, healed_selector, value)
                             if "[FAILED]" not in res_healed:
                                 step_status = "HEALED"
                                 step_result = f"Auto-healed selector: {res_healed}"
                                 selector = healed_selector
+                                # Persist verified locator into durable memory
+                                remember_locator(
+                                    original_selector=effective_selector,
+                                    healed_selector=healed_selector,
+                                    target_url=current_url,
+                                    tag=action,
+                                )
                             else:
                                 step_status = "FAILED"
                                 step_result = f"Action failed after self-heal attempt: {res_healed}"
@@ -487,6 +501,7 @@ class AutonomousGoalPlanner:
                             step_result = res
                     else:
                         step_result = res
+                        selector = effective_selector
 
                 elif action.startswith("assert"):
                     a_type = assertion_type

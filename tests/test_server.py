@@ -148,3 +148,10 @@ def test_canary_targets_crud():
     assert len(targets) >= 1
     assert any(t["name"] == "DreamVault Staking Sentinel" for t in targets)
 
+
+def test_get_learned_locators_endpoint():
+    """Verify GET /api/locators returns learned locators."""
+    response = client.get("/api/locators")
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+
