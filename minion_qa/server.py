@@ -17,12 +17,13 @@ import os
 import sys
 import time
 from pathlib import Path
+import asyncio
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 
@@ -34,9 +35,12 @@ from minion_qa.autonomous_planner import AutonomousGoalPlanner, AutonomousPlanRe
 from minion_qa.config import MinionQAConfig, default_config
 from minion_qa.database import SessionLocal, init_db
 from minion_qa.models import (
+    CanaryMapNode,
     CanaryRun,
     CanaryRunStatus,
+    CanarySchedule,
     CanaryTarget,
+    NetworkSentinel,
     RunAssertion,
     RunScreenshot,
     utc_now,
@@ -281,6 +285,90 @@ def get_system_status() -> Dict[str, Any]:
         "screenshots_captured": len(list(default_config.screenshot_dir.glob("*.png"))),
         "reports_generated": len(list(default_config.reports_dir.glob("*.md"))),
     }
+
+
+@app.get("/api/dashboard/kpis")
+def get_dashboard_kpis() -> Dict[str, Any]:
+    """Retrieve comprehensive system health KPIs, regression sentinel metrics, and network proofs."""
+    try:
+        with SessionLocal() as db:
+            total_runs = db.query(CanaryRun).count()
+            passed_runs = db.query(CanaryRun).filter(CanaryRun.is_successful == True).count()
+            failed_runs = db.query(CanaryRun).filter(CanaryRun.is_successful == False).count()
+            anomaly_runs = db.query(CanaryRun).filter(CanaryRun.anomaly_detected == True).count()
+            sentinel_count = db.query(NetworkSentinel).count()
+            targets_count = db.query(CanaryTarget).count()
+
+            schedules = db.query(CanarySchedule).all()
+            active_schedules = sum(1 for s in schedules if s.enabled)
+            total_regressions = sum(s.regression_count for s in schedules)
+
+            total_map_nodes = db.query(CanaryMapNode).count()
+            covered_nodes = db.query(CanaryMapNode).filter(CanaryMapNode.is_covered == True).count()
+
+            pass_rate = round((passed_runs / total_runs * 100.0), 1) if total_runs > 0 else 0.0
+            failure_rate = round((failed_runs / total_runs * 100.0), 1) if total_runs > 0 else 0.0
+            map_coverage_pct = round((covered_nodes / total_map_nodes * 100.0), 1) if total_map_nodes > 0 else 0.0
+
+            return {
+                "total_runs": total_runs,
+                "passed_runs": passed_runs,
+                "failed_runs": failed_runs,
+                "pass_rate": pass_rate,
+                "failure_rate": failure_rate,
+                "anomaly_runs": anomaly_runs,
+                "network_sentinel_proofs": sentinel_count,
+                "canary_targets_count": targets_count,
+                "active_schedules_count": active_schedules,
+                "total_regressions": total_regressions,
+                "total_map_nodes": total_map_nodes,
+                "covered_map_nodes": covered_nodes,
+                "map_coverage_percentage": map_coverage_pct,
+            }
+    except Exception:
+        total = len(_run_history)
+        passed = sum(1 for r in _run_history if r.get("status") == "PASSED")
+        return {
+            "total_runs": total,
+            "passed_runs": passed,
+            "failed_runs": total - passed,
+            "pass_rate": round(passed / total * 100.0, 1) if total else 0.0,
+            "failure_rate": round((total - passed) / total * 100.0, 1) if total else 0.0,
+            "anomaly_runs": 0,
+            "network_sentinel_proofs": 0,
+            "canary_targets_count": 0,
+            "active_schedules_count": 0,
+            "total_regressions": 0,
+            "total_map_nodes": 0,
+            "covered_map_nodes": 0,
+            "map_coverage_percentage": 0.0,
+        }
+
+
+@app.get("/api/runs/{job_id}/stream")
+async def stream_run_endpoint(job_id: str):
+    """Server-Sent Events (SSE) — stream live_steps and execution status."""
+    async def event_generator():
+        last_step_idx = 0
+        for _ in range(120):
+            await asyncio.sleep(0.8)
+            job = default_worker.get_job(job_id)
+            if job:
+                steps = job.live_steps
+                if len(steps) > last_step_idx:
+                    for s in steps[last_step_idx:]:
+                        yield f"data: {json.dumps({'type': 'step', 'step': s})}\n\n"
+                    last_step_idx = len(steps)
+                if job.status in ("completed", "failed", "cancelled"):
+                    yield f"data: {json.dumps({'type': 'done', 'status': job.status, 'result': job.result})}\n\n"
+                    break
+            else:
+                with SessionLocal() as db:
+                    r = db.query(CanaryRun).filter(CanaryRun.job_id == job_id).first()
+                    if r:
+                        yield f"data: {json.dumps({'type': 'done', 'status': r.status.value if hasattr(r.status, 'value') else str(r.status)})}\n\n"
+                    break
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/api/runs")
@@ -834,6 +922,58 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Executive Health KPIs Grid -->
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div class="glass-card rounded-xl p-4 border border-gray-800">
+        <div class="text-[11px] text-gray-400 font-semibold uppercase tracking-wider flex items-center justify-between">
+          <span>Total Runs</span>
+          <i class="fa-solid fa-list-check text-cyan-400"></i>
+        </div>
+        <div id="kpiTotalRuns" class="text-2xl font-extrabold text-white mt-1.5 font-mono">--</div>
+        <div class="text-[10px] text-gray-500 mt-1">Autonomous executions</div>
+      </div>
+      <div class="glass-card rounded-xl p-4 border border-gray-800">
+        <div class="text-[11px] text-gray-400 font-semibold uppercase tracking-wider flex items-center justify-between">
+          <span>Pass Rate</span>
+          <i class="fa-solid fa-circle-check text-emerald-400"></i>
+        </div>
+        <div id="kpiPassRate" class="text-2xl font-extrabold text-emerald-400 mt-1.5 font-mono">--%</div>
+        <div class="text-[10px] text-gray-500 mt-1">Verified flows</div>
+      </div>
+      <div class="glass-card rounded-xl p-4 border border-gray-800">
+        <div class="text-[11px] text-gray-400 font-semibold uppercase tracking-wider flex items-center justify-between">
+          <span>Failures</span>
+          <i class="fa-solid fa-triangle-exclamation text-rose-400"></i>
+        </div>
+        <div id="kpiFailures" class="text-2xl font-extrabold text-rose-400 mt-1.5 font-mono">--</div>
+        <div class="text-[10px] text-gray-500 mt-1">Caught anomalies</div>
+      </div>
+      <div class="glass-card rounded-xl p-4 border border-gray-800">
+        <div class="text-[11px] text-gray-400 font-semibold uppercase tracking-wider flex items-center justify-between">
+          <span>Regressions</span>
+          <i class="fa-solid fa-shield-virus text-amber-400"></i>
+        </div>
+        <div id="kpiRegressions" class="text-2xl font-extrabold text-amber-400 mt-1.5 font-mono">0</div>
+        <div class="text-[10px] text-gray-500 mt-1">Watchdog alerts</div>
+      </div>
+      <div class="glass-card rounded-xl p-4 border border-gray-800">
+        <div class="text-[11px] text-gray-400 font-semibold uppercase tracking-wider flex items-center justify-between">
+          <span>Proof Sentinels</span>
+          <i class="fa-solid fa-fingerprint text-indigo-400"></i>
+        </div>
+        <div id="kpiSentinels" class="text-2xl font-extrabold text-indigo-400 mt-1.5 font-mono">--</div>
+        <div class="text-[10px] text-gray-500 mt-1">Cortensor cryptographic proofs</div>
+      </div>
+      <div class="glass-card rounded-xl p-4 border border-gray-800">
+        <div class="text-[11px] text-gray-400 font-semibold uppercase tracking-wider flex items-center justify-between">
+          <span>Canary Targets</span>
+          <i class="fa-solid fa-radar text-purple-400"></i>
+        </div>
+        <div id="kpiTargets" class="text-2xl font-extrabold text-purple-400 mt-1.5 font-mono">--</div>
+        <div id="kpiCoverage" class="text-[10px] text-gray-500 mt-1">Map coverage: --%</div>
+      </div>
+    </div>
+
     <!-- Centerpiece: Autonomous Goal Studio -->
     <div class="glass-card rounded-2xl p-6 border border-cyan-800/50 shadow-xl space-y-6">
       <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-gray-800/80 pb-4">
@@ -960,6 +1100,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
     </div>
+
+    <!-- Decentralized Canary Targets & 24/7 Watchdog Command Center -->
+    <div class="glass-card rounded-2xl p-6 border border-purple-900/40 shadow-xl space-y-5">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-gray-800/80 pb-4">
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="text-xl">📡</span>
+            <h3 class="text-xl font-bold text-white">Canary Targets & 24/7 Watchdog Command Center</h3>
+            <span class="px-2 py-0.5 text-[11px] font-semibold rounded-full bg-purple-950 text-purple-300 border border-purple-800">Decentralized Monitoring</span>
+          </div>
+          <p class="text-xs text-gray-400 mt-1">
+            Registered Web3 dApps under continuous monitoring. Autonomously crawls application topology (Canary Map), executes regression sentinels, and records cryptographic execution proofs.
+          </p>
+        </div>
+        <button onclick="toggleRegisterModal(true)" class="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs flex items-center gap-2 shadow-lg shadow-purple-600/20 transition">
+          <i class="fa-solid fa-plus"></i>
+          <span>Register New dApp Target</span>
+        </button>
+      </div>
+
+      <!-- Target List Grid -->
+      <div id="targetsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div class="text-xs text-gray-500 py-4 col-span-3">Loading registered canary targets...</div>
+      </div>
+    </div>
+
 
     <!-- Metrics Cards -->
     <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -1118,6 +1284,70 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <pre id="reportMarkdownPre" class="bg-gray-950 p-4 rounded-xl text-xs text-gray-300 font-mono overflow-x-auto max-h-72 border border-gray-850"></pre>
       </div>
 
+    </div>
+
+    <!-- Modal: Canary Map Topology Viewer -->
+    <div id="canaryMapModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm hidden p-4">
+      <div class="glass-card w-full max-w-4xl max-h-[90vh] rounded-2xl p-6 border border-gray-700 shadow-2xl flex flex-col space-y-4">
+        <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+          <div>
+            <h3 id="mapModalTitle" class="text-lg font-bold text-white flex items-center gap-2">
+              <i class="fa-solid fa-diagram-project text-cyan-400"></i>
+              <span>Application Canary Map</span>
+            </h3>
+            <p id="mapModalSubtitle" class="text-xs text-gray-400"></p>
+          </div>
+          <button onclick="toggleMapModal(false)" class="text-gray-400 hover:text-white text-lg px-2 py-1">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+        <div id="mapNodesContainer" class="flex-1 overflow-y-auto space-y-3 pr-2">
+          <!-- Nodes rendered here -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Register Target -->
+    <div id="registerTargetModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm hidden p-4">
+      <div class="glass-card w-full max-w-md rounded-2xl p-6 border border-gray-700 shadow-2xl space-y-4">
+        <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-plus-circle text-purple-400"></i>
+            <span>Register Canary Target</span>
+          </h3>
+          <button onclick="toggleRegisterModal(false)" class="text-gray-400 hover:text-white px-2 py-1">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+        <div class="space-y-3 text-xs">
+          <div>
+            <label class="block font-semibold text-gray-300 mb-1">dApp / App Name</label>
+            <input id="newTargetName" type="text" placeholder="e.g. Uniswap V3 Arbitrum" class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white">
+          </div>
+          <div>
+            <label class="block font-semibold text-gray-300 mb-1">Base Target URL</label>
+            <input id="newTargetUrl" type="url" placeholder="https://app.uniswap.org" class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white font-mono">
+          </div>
+          <div>
+            <label class="block font-semibold text-gray-300 mb-1">Description / Notes</label>
+            <input id="newTargetDesc" type="text" placeholder="Decentralized liquidity pool & swap sentinel" class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white">
+          </div>
+          <div>
+            <label class="block font-semibold text-gray-300 mb-1">Watchdog Interval (Minutes)</label>
+            <select id="newTargetInterval" class="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white">
+              <option value="15">Every 15 Minutes</option>
+              <option value="30">Every 30 Minutes</option>
+              <option value="60" selected>Every 60 Minutes (Hourly)</option>
+              <option value="360">Every 6 Hours</option>
+              <option value="1440">Daily (24 Hours)</option>
+            </select>
+          </div>
+        </div>
+        <div class="flex justify-end gap-2 pt-2 border-t border-gray-800">
+          <button onclick="toggleRegisterModal(false)" class="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs">Cancel</button>
+          <button onclick="submitNewTarget()" class="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs">Save Target</button>
+        </div>
+      </div>
     </div>
 
   </main>
@@ -1409,9 +1639,253 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
+    // Modal Helpers
+    function toggleMapModal(show) {
+      document.getElementById('canaryMapModal').classList.toggle('hidden', !show);
+    }
+    function toggleRegisterModal(show) {
+      document.getElementById('registerTargetModal').classList.toggle('hidden', !show);
+    }
+
+    async function fetchKpis() {
+      try {
+        const res = await fetch('/api/dashboard/kpis');
+        if (res.ok) {
+          const d = await res.json();
+          document.getElementById('kpiTotalRuns').innerText = d.total_runs;
+          document.getElementById('kpiPassRate').innerText = `${d.pass_rate}%`;
+          document.getElementById('kpiFailures').innerText = `${d.failed_runs}`;
+          document.getElementById('kpiRegressions').innerText = `${d.total_regressions}`;
+          document.getElementById('kpiSentinels').innerText = `${d.network_sentinel_proofs}`;
+          document.getElementById('kpiTargets').innerText = `${d.canary_targets_count}`;
+          document.getElementById('kpiCoverage').innerText = `Map coverage: ${d.map_coverage_percentage}%`;
+        }
+      } catch (e) {}
+    }
+
+    async function fetchCanaryTargets() {
+      const container = document.getElementById('targetsGrid');
+      try {
+        const [targetsRes, schedsRes] = await Promise.all([
+          fetch('/api/targets'),
+          fetch('/api/schedules')
+        ]);
+        const targets = targetsRes.ok ? await targetsRes.json() : [];
+        const schedules = schedsRes.ok ? await schedsRes.json() : [];
+        const schedMap = {};
+        schedules.forEach(s => { schedMap[s.target_id] = s; });
+
+        if (targets.length === 0) {
+          container.innerHTML = '<div class="text-xs text-gray-500 py-6 col-span-3 text-center">No canary targets registered yet. Click &quot;Register New dApp Target&quot; above to start 24/7 monitoring.</div>';
+          return;
+        }
+
+        container.innerHTML = '';
+        targets.forEach(t => {
+          const sched = schedMap[t.id] || { interval_minutes: t.schedule_interval_minutes || 60, enabled: true, last_verdict: null, regression_count: 0 };
+          const verdict = sched.last_verdict;
+          let badge = '<span class="px-2 py-0.5 rounded text-[10px] font-semibold bg-gray-800 text-gray-400">UNTESTED</span>';
+          if (verdict === 'REGRESSION') {
+            badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-300 border border-rose-700 animate-pulse">🚨 REGRESSION DETECTED</span>';
+          } else if (verdict === 'PASSED') {
+            badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800">✅ PASSING</span>';
+          } else if (verdict === 'FAILED') {
+            badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-950 text-rose-400 border border-rose-800">❌ FAILING</span>';
+          }
+
+          const card = document.createElement('div');
+          card.className = 'glass rounded-xl p-4 border border-gray-800 space-y-3 hover:border-purple-850 transition';
+          card.innerHTML = `
+            <div class="flex items-start justify-between gap-2">
+              <div>
+                <h4 class="text-sm font-bold text-white flex items-center gap-1.5">
+                  <i class="fa-solid fa-satellite text-purple-400"></i>
+                  <span>${t.name}</span>
+                </h4>
+                <a href="${t.base_url}" target="_blank" class="text-xs text-cyan-400 font-mono hover:underline truncate block max-w-[240px]">${t.base_url}</a>
+              </div>
+              ${badge}
+            </div>
+            <p class="text-[11px] text-gray-400 line-clamp-2">${t.description || 'Decentralized canary target'}</p>
+            <div class="flex items-center justify-between text-[11px] text-gray-400 font-mono pt-1 border-t border-gray-850">
+              <span>Watchdog: ${sched.interval_minutes}m</span>
+              <span>Runs: ${sched.total_runs || t.runs_count || 0}</span>
+            </div>
+            <div class="grid grid-cols-3 gap-1.5 pt-1">
+              <button onclick="exploreTarget(${t.id}, '${t.name}')" class="py-1.5 px-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-cyan-300 border border-gray-700 text-[10px] font-semibold flex items-center justify-center gap-1 transition">
+                <i class="fa-solid fa-compass"></i> Explore
+              </button>
+              <button onclick="openCanaryMapModal(${t.id}, '${t.name}', '${t.base_url}')" class="py-1.5 px-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-purple-300 border border-gray-700 text-[10px] font-semibold flex items-center justify-center gap-1 transition">
+                <i class="fa-solid fa-diagram-project"></i> Map
+              </button>
+              <button onclick="triggerCanaryTest(${t.id}, '${t.name}')" class="py-1.5 px-2 rounded-lg bg-purple-950/80 hover:bg-purple-900 text-purple-300 border border-purple-800 text-[10px] font-semibold flex items-center justify-center gap-1 transition">
+                <i class="fa-solid fa-play"></i> Test
+              </button>
+            </div>
+          `;
+          container.appendChild(card);
+        });
+      } catch (e) {
+        container.innerHTML = '<div class="text-xs text-rose-400 py-4 col-span-3">Failed to load canary targets.</div>';
+      }
+    }
+
+    async function submitNewTarget() {
+      const name = document.getElementById('newTargetName').value.trim();
+      const baseUrl = document.getElementById('newTargetUrl').value.trim();
+      const desc = document.getElementById('newTargetDesc').value.trim();
+      const interval = parseInt(document.getElementById('newTargetInterval').value);
+
+      if (!name || !baseUrl) {
+        alert('Please specify target name and URL');
+        return;
+      }
+
+      try {
+        const resp = await fetch('/api/targets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: name,
+            base_url: baseUrl,
+            description: desc,
+            schedule_interval_minutes: interval
+          })
+        });
+        if (resp.ok) {
+          const t = await resp.json();
+          await fetch(`/api/targets/${t.id}/schedule?interval_minutes=${interval}&enabled=true`, { method: 'POST' });
+          toggleRegisterModal(false);
+          document.getElementById('newTargetName').value = '';
+          document.getElementById('newTargetUrl').value = '';
+          document.getElementById('newTargetDesc').value = '';
+          await fetchCanaryTargets();
+          await fetchKpis();
+        } else {
+          alert('Failed to register target');
+        }
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function exploreTarget(id, name) {
+      try {
+        alert(`Starting exploration crawler on "${name}"... Please wait.`);
+        const resp = await fetch(`/api/targets/${id}/explore?max_pages=4`, { method: 'POST' });
+        if (resp.ok) {
+          const map = await resp.json();
+          alert(`Crawl complete for "${name}"!\nDiscovered ${map.total_pages} pages, ${map.total_forms} forms, and ${map.total_flows} actions.`);
+          await fetchCanaryTargets();
+          await fetchKpis();
+        } else {
+          alert('Failed to explore target.');
+        }
+      } catch (e) {
+        alert('Exploration error: ' + e.message);
+      }
+    }
+
+    async function triggerCanaryTest(id, name) {
+      const panel = document.getElementById('executionPanel');
+      const results = document.getElementById('resultsSection');
+      const spinner = document.getElementById('statusSpinner');
+      const title = document.getElementById('execTitle');
+      const subtitle = document.getElementById('execSubtitle');
+      const badge = document.getElementById('verdictBadge');
+      const logBox = document.getElementById('execLogBox');
+
+      panel.classList.remove('hidden');
+      results.classList.add('hidden');
+      spinner.classList.remove('hidden');
+      badge.innerHTML = '';
+      title.innerText = `Running 24/7 Canary Watchdog on ${name}...`;
+      subtitle.innerText = 'Selecting priority node, executing goal planner, verifying regressions & attestation...';
+      logBox.innerHTML = `<div class="text-purple-400">[0.0s] Canary Sentinel watchdog dispatched for target #${id}...</div>`;
+
+      try {
+        const resp = await fetch(`/api/targets/${id}/trigger`, { method: 'POST' });
+        const data = await resp.json();
+        spinner.classList.add('hidden');
+
+        if (data.is_regression) {
+          title.innerText = '🚨 REGRESSION DETECTED!';
+          badge.innerHTML = '<span class="px-3 py-1 rounded-full bg-rose-950 text-rose-300 border border-rose-700 font-bold text-xs animate-pulse">🚨 REGRESSION</span>';
+          logBox.innerHTML += `<div class="text-rose-400 font-bold">[ALERT] REGRESSION DETECTED on node '${data.node_tested}'! Previously passed, now failed!</div>`;
+        } else if (data.status === 'PASSED') {
+          title.innerText = 'Canary Sentinel Passed';
+          badge.innerHTML = '<span class="px-3 py-1 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold text-xs">✅ PASSED</span>';
+          logBox.innerHTML += `<div class="text-emerald-400 font-bold">[Verified] Node '${data.node_tested}' verified healthy. Duration: ${data.duration_seconds}s.</div>`;
+        } else {
+          title.innerText = 'Canary Sentinel Failed';
+          badge.innerHTML = '<span class="px-3 py-1 rounded-full bg-rose-950 text-rose-400 border border-rose-800 font-bold text-xs">❌ FAILED</span>';
+          logBox.innerHTML += `<div class="text-rose-400 font-bold">[Status] Node '${data.node_tested}' execution failed.</div>`;
+        }
+
+        await fetchCanaryTargets();
+        await fetchKpis();
+        const runsRes = await fetch('/api/runs');
+        if (runsRes.ok) {
+          const runs = await runsRes.json();
+          if (runs.length > 0) {
+            results.classList.remove('hidden');
+            renderRunDetails(runs[0]);
+          }
+        }
+      } catch (e) {
+        spinner.classList.add('hidden');
+        title.innerText = 'Error in Canary Trigger';
+        logBox.innerHTML += `<div class="text-rose-400 font-bold">Error: ${e.message}</div>`;
+      }
+    }
+
+    async function openCanaryMapModal(id, name, baseUrl) {
+      document.getElementById('mapModalTitle').innerHTML = `<i class="fa-solid fa-diagram-project text-cyan-400 mr-2"></i><span>Canary Map: ${name}</span>`;
+      document.getElementById('mapModalSubtitle').innerText = `Base URL: ${baseUrl}`;
+      const container = document.getElementById('mapNodesContainer');
+      container.innerHTML = '<div class="text-xs text-gray-500 py-6 text-center">Loading application map topology...</div>';
+      toggleMapModal(true);
+
+      try {
+        const resp = await fetch(`/api/targets/${id}/map`);
+        if (!resp.ok) {
+          container.innerHTML = '<div class="text-xs text-amber-400 py-6 text-center">No Canary Map discovered yet. Click &quot;⚡ Explore&quot; on the target card to crawl pages, forms, and flows.</div>';
+          return;
+        }
+        const map = await resp.json();
+        container.innerHTML = `
+          <div class="glass p-3 rounded-xl border border-gray-800 flex items-center justify-between text-xs text-gray-300 mb-3">
+            <span><strong>Total Nodes:</strong> ${map.nodes.length} (${map.total_pages} pages, ${map.total_forms} forms, ${map.total_flows} actions)</span>
+            <span class="text-emerald-400 font-mono"><strong>Coverage:</strong> ${map.coverage_percentage}%</span>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            ${map.nodes.map(n => `
+              <div class="glass p-3 rounded-xl border ${n.is_covered ? 'border-emerald-900/60 bg-emerald-950/10' : 'border-gray-800'} space-y-1.5 text-xs">
+                <div class="flex items-center justify-between">
+                  <span class="font-bold text-white">${n.label}</span>
+                  <span class="px-2 py-0.5 rounded text-[10px] font-mono uppercase ${n.business_category === 'swap' || n.business_category === 'checkout' ? 'bg-cyan-950 text-cyan-300 border border-cyan-800' : 'bg-gray-800 text-gray-400'}">${n.business_category || 'other'}</span>
+                </div>
+                <div class="text-[11px] text-gray-400">${n.description || n.node_type}</div>
+                ${n.suggested_prompt ? `<div class="text-[10px] text-purple-300 bg-purple-950/40 p-2 rounded border border-purple-900/50 font-mono"><strong>Prompt:</strong> ${n.suggested_prompt}</div>` : ''}
+                <div class="flex items-center justify-between pt-1 text-[10px] text-gray-500">
+                  <span>Type: ${n.node_type}</span>
+                  <span class="${n.is_covered ? 'text-emerald-400 font-bold' : 'text-gray-500'}">${n.is_covered ? '✅ Covered' : '⏳ Uncovered'}</span>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        `;
+      } catch (e) {
+        container.innerHTML = `<div class="text-xs text-rose-400 py-6 text-center">Error loading map: ${e.message}</div>`;
+      }
+    }
+
     // Auto-load sample report or status on page load
     window.addEventListener('DOMContentLoaded', async () => {
       try {
+        fetchKpis();
+        fetchCanaryTargets();
+
         const statusRes = await fetch('/api/status');
         if (statusRes.ok) {
           const st = await statusRes.json();

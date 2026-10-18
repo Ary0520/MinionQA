@@ -178,3 +178,28 @@ def test_get_run_attestation_endpoint():
     assert "cort_miner_" in att_data["attestation"]["miner_id"]
     assert len(att_data["attestation"]["raw_response_hash"]) == 64
 
+
+def test_get_dashboard_kpis_endpoint():
+    """Verify GET /api/dashboard/kpis returns calculated health metrics."""
+    res = client.get("/api/dashboard/kpis")
+    assert res.status_code == 200
+    kpis = res.json()
+    assert "total_runs" in kpis
+    assert "pass_rate" in kpis
+    assert "failed_runs" in kpis
+    assert "network_sentinel_proofs" in kpis
+    assert "canary_targets_count" in kpis
+    assert "total_regressions" in kpis
+    assert isinstance(kpis["pass_rate"], (int, float))
+
+
+def test_stream_run_endpoint():
+    """Verify GET /api/runs/{job_id}/stream returns streaming event response."""
+    run_res = client.post("/api/run-custom", json={"name": "Stream Test", "url": "https://example.com"})
+    job_id = run_res.json()["job_id"]
+
+    stream_res = client.get(f"/api/runs/{job_id}/stream")
+    assert stream_res.status_code == 200
+    assert "text/event-stream" in stream_res.headers.get("content-type", "")
+
+
