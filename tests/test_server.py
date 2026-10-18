@@ -113,3 +113,38 @@ def test_post_run_autonomous_endpoint(mock_planner_class):
     history = history_res.json()
     assert len(history) >= 1
     assert any(r["session_id"] == "test_sess_123" for r in history)
+
+    # Verify run can be fetched via /api/runs/{job_id}
+    job_id = data["job_id"]
+    single_res = client.get(f"/api/runs/{job_id}")
+    assert single_res.status_code == 200
+    single_data = single_res.json()
+    assert single_data["job_id"] == job_id
+    assert single_data["verdict"] == "PASSED"
+    assert single_data["status"] in ("completed", "PASSED")
+
+
+def test_canary_targets_crud():
+    """Verify creating and listing CanaryTarget monitored applications."""
+    target_payload = {
+        "name": "DreamVault Staking Sentinel",
+        "base_url": "https://dreamvault.netlify.app",
+        "description": "Cortensor Web3 Staking and Yield Vault",
+        "login_hint": "MetaMask wallet connect",
+        "schedule_interval_minutes": 15,
+    }
+
+    create_res = client.post("/api/targets", json=target_payload)
+    assert create_res.status_code == 200
+    created = create_res.json()
+    assert created["id"] is not None
+    assert created["name"] == "DreamVault Staking Sentinel"
+    assert created["base_url"] == "https://dreamvault.netlify.app"
+    assert created["schedule_interval_minutes"] == 15
+
+    list_res = client.get("/api/targets")
+    assert list_res.status_code == 200
+    targets = list_res.json()
+    assert len(targets) >= 1
+    assert any(t["name"] == "DreamVault Staking Sentinel" for t in targets)
+

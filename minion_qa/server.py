@@ -11,6 +11,11 @@ from __future__ import annotations
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
+import json
+import os
+import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -25,16 +30,40 @@ import uvicorn
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from minion_qa.agent import MinionQAAgent
-from minion_qa.autonomous_planner import AutonomousGoalPlanner, AutonomousPlanResult
+from minion_qa.autonomous_planner import AutonomousGoalPlanner, AutonomousPlanResult, PlannerStepTrace
 from minion_qa.config import MinionQAConfig, default_config
+from minion_qa.database import SessionLocal, init_db
+from minion_qa.models import (
+    CanaryRun,
+    CanaryRunStatus,
+    CanaryTarget,
+    RunAssertion,
+    RunScreenshot,
+    utc_now,
+)
 from minion_qa.tools.assertions import get_assertion_history, clear_assertion_history
 from minion_qa.tools.browser import get_browser_session, reset_browser_session
+from minion_qa.worker import default_worker, classify_rca
 from examples.test_ecommerce_checkout import build_ecommerce_checkout_flow
+
+# Initialize database tables on server import
+init_db()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifecycle manager: starts background worker and ensures DB schema."""
+    init_db()
+    default_worker.start()
+    yield
+    await default_worker.stop()
+
 
 app = FastAPI(
     title="MinionQA Server",
     description="Autonomous Web QA & Revenue-Flow Validation Agent for Cortensor Hackathon #5",
-    version="0.1.0",
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -45,7 +74,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory history of runs for dashboard
+# In-memory history of runs for immediate access
 _run_history: List[Dict[str, Any]] = []
 
 
@@ -57,6 +86,7 @@ class AutonomousRunRequest(BaseModel):
     )
     max_turns: int = 15
     headless: bool = True
+    async_mode: bool = False
 
 
 class CustomRunRequest(BaseModel):
@@ -71,21 +101,160 @@ class EcommerceRunRequest(BaseModel):
     headless: bool = True
 
 
+class CanaryTargetCreate(BaseModel):
+    name: str
+    base_url: str
+    description: Optional[str] = None
+    login_hint: Optional[str] = None
+    schedule_interval_minutes: Optional[int] = 60
+
+
+def _persist_run_to_db(
+    job_id: str,
+    name: str,
+    goal: str,
+    target_url: str,
+    status: str,
+    duration: float,
+    session_id: str,
+    assertions_count: int,
+    assertions_passed: int,
+    report_path: Optional[str] = None,
+    report_filename: Optional[str] = None,
+    screenshots: Optional[List[Dict[str, Any]]] = None,
+    assertions: Optional[List[Dict[str, Any]]] = None,
+    traces: Optional[List[Dict[str, Any]]] = None,
+    provider_used: Optional[str] = None,
+    model_used: Optional[str] = None,
+    error_message: Optional[str] = None,
+    rca_category: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Helper to persist a completed run and child artifacts to database and memory."""
+    is_successful = (status.upper() == "PASSED")
+    verdict = "PASSED" if is_successful else "FAILED"
+    calculated_rca = rca_category or classify_rca(
+        error_message, has_failed_assertion=(not is_successful)
+    )
+
+    try:
+        with SessionLocal() as db:
+            db_run = db.query(CanaryRun).filter(CanaryRun.job_id == job_id).first()
+            if not db_run:
+                db_run = CanaryRun(
+                    job_id=job_id,
+                    name=name,
+                    goal=goal,
+                    target_url=target_url,
+                    created_at=utc_now(),
+                )
+                db.add(db_run)
+                db.flush()
+
+            db_run.status = CanaryRunStatus.COMPLETED if is_successful else CanaryRunStatus.FAILED
+            db_run.is_successful = is_successful
+            db_run.verdict = verdict
+            db_run.duration_seconds = duration
+            db_run.completed_at = utc_now()
+            db_run.cortensor_session_id = session_id
+            db_run.assertions_count = assertions_count
+            db_run.assertions_passed = assertions_passed
+            db_run.report_path = report_path
+            db_run.report_filename = report_filename
+            db_run.llm_provider = provider_used
+            db_run.llm_model = model_used
+            db_run.error_message = error_message
+            db_run.rca_category = calculated_rca
+            db_run.total_turns = len(traces) if traces else 0
+
+            if assertions:
+                db_run.assertion_results = json.dumps(assertions)
+            if traces:
+                db_run.steps_log = json.dumps(traces)
+
+            if screenshots:
+                for s in screenshots:
+                    s_path = s.get("path") if isinstance(s, dict) else str(s)
+                    s_name = s.get("filename") if isinstance(s, dict) else Path(s_path).name
+                    s_fail = bool(s.get("is_failure", False)) if isinstance(s, dict) else ("fail" in s_name.lower())
+                    db.add(RunScreenshot(
+                        run_id=db_run.id,
+                        file_path=s_path,
+                        filename=s_name,
+                        url=target_url,
+                        is_failure=s_fail,
+                    ))
+
+            if assertions:
+                for a in assertions:
+                    if isinstance(a, dict):
+                        db.add(RunAssertion(
+                            run_id=db_run.id,
+                            assertion_type=a.get("assertion_type", "custom"),
+                            target=a.get("target", ""),
+                            expected_value=a.get("expected_value"),
+                            actual_value=a.get("actual_value"),
+                            passed=bool(a.get("passed", False)),
+                            detail=a.get("detail"),
+                        ))
+
+            db.commit()
+    except Exception as exc:
+        pass  # In-memory record is still preserved below
+
+    record = {
+        "id": job_id,
+        "job_id": job_id,
+        "name": name,
+        "target_url": target_url,
+        "goal": goal,
+        "status": status,
+        "verdict": verdict,
+        "rca_category": calculated_rca,
+        "duration": duration,
+        "session_id": session_id,
+        "assertions_count": assertions_count,
+        "assertions_passed": assertions_passed,
+        "report_path": report_path,
+        "report_filename": report_filename,
+        "screenshots": screenshots or [],
+        "assertions": assertions or [],
+        "traces": traces or [],
+        "provider_used": provider_used,
+        "model_used": model_used,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
+    }
+    _run_history.append(record)
+    return record
+
+
 @app.get("/api/status")
 def get_system_status() -> Dict[str, Any]:
     """Return runtime telemetry, OpenMinion status, and Cortensor integration info."""
+    db_runs_count = 0
+    canary_targets_count = 0
+    try:
+        with SessionLocal() as db:
+            db_runs_count = db.query(CanaryRun).count()
+            canary_targets_count = db.query(CanaryTarget).count()
+    except Exception:
+        db_runs_count = len(_run_history)
+
     return {
         "service": "MinionQA Autonomous QA Agent",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "openminion_sdk": "0.1.6",
         "runtime": "Python 3.13 (Cortensor Mainnet Full Alpha)",
         "network": "Cortensor Decentralized Inference Network",
+        "database": "SQLAlchemy Persistent ORM (SQLite / PostgreSQL)",
+        "persisted_runs_count": db_runs_count,
+        "active_canary_targets": canary_targets_count,
+        "worker_status": "RUNNING" if default_worker.is_running else "READY",
         "provider": default_config.provider,
         "model": default_config.model,
         "action_policy_gating": "ENABLED (Safe read/write confirmation preview)",
         "dom_compaction_engine": "ACTIVE (<450 token structural extract)",
         "self_healing_selectors": "ACTIVE (Ranked DOM heuristic fallback)",
-        "total_runs_executed": len(_run_history),
+        "total_runs_executed": max(db_runs_count, len(_run_history)),
         "assertion_oracle": "Deterministic Revenue-Flow Engine",
         "screenshots_captured": len(list(default_config.screenshot_dir.glob("*.png"))),
         "reports_generated": len(list(default_config.reports_dir.glob("*.md"))),
@@ -94,18 +263,194 @@ def get_system_status() -> Dict[str, Any]:
 
 @app.get("/api/runs")
 def list_runs() -> List[Dict[str, Any]]:
-    """List recent agent execution runs."""
+    """List recent agent execution runs from persistent database."""
+    try:
+        with SessionLocal() as db:
+            db_runs = db.query(CanaryRun).order_by(CanaryRun.created_at.desc()).limit(100).all()
+            if db_runs:
+                results = []
+                for r in db_runs:
+                    results.append({
+                        "id": r.job_id,
+                        "job_id": r.job_id,
+                        "name": r.name,
+                        "target_url": r.target_url,
+                        "goal": r.goal,
+                        "status": r.status.value if hasattr(r.status, "value") else str(r.status),
+                        "verdict": r.verdict or ("PASSED" if r.is_successful else "FAILED"),
+                        "rca_category": r.rca_category,
+                        "duration": r.duration_seconds,
+                        "session_id": r.cortensor_session_id or r.job_id,
+                        "assertions_count": r.assertions_count,
+                        "assertions_passed": r.assertions_passed,
+                        "report_path": r.report_path,
+                        "report_filename": r.report_filename,
+                        "screenshots": [
+                            {
+                                "path": s.file_path,
+                                "filename": s.filename,
+                                "is_failure": s.is_failure,
+                            }
+                            for s in r.screenshots
+                        ],
+                        "assertions": json.loads(r.assertion_results) if r.assertion_results else [],
+                        "traces": json.loads(r.steps_log) if r.steps_log else [],
+                        "provider_used": r.llm_provider,
+                        "model_used": r.llm_model,
+                        "timestamp": r.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if r.created_at else "",
+                    })
+                return results
+    except Exception:
+        pass
+
+    # Fallback to in-memory history if DB is empty or fails
     return _run_history[::-1]
+
+
+@app.get("/api/runs/{job_id}")
+def get_run(job_id: str) -> Dict[str, Any]:
+    """Retrieve detailed state, live steps, or final report of a specific run."""
+    # 1. Check in-flight background worker first
+    job = default_worker.get_job(job_id)
+    if job and job.status in ("pending", "running"):
+        return {
+            "job_id": job.job_id,
+            "name": job.name,
+            "status": job.status,
+            "duration": round(time.time() - (job.started_at or job.created_at), 2),
+            "current_step": job.current_step,
+            "live_steps": job.live_steps,
+            "is_in_flight": True,
+        }
+
+    # 2. Check persistent database
+    try:
+        with SessionLocal() as db:
+            r = db.query(CanaryRun).filter(CanaryRun.job_id == job_id).first()
+            if r:
+                return {
+                    "id": r.job_id,
+                    "job_id": r.job_id,
+                    "name": r.name,
+                    "target_url": r.target_url,
+                    "goal": r.goal,
+                    "status": r.status.value if hasattr(r.status, "value") else str(r.status),
+                    "verdict": r.verdict,
+                    "rca_category": r.rca_category,
+                    "duration": r.duration_seconds,
+                    "session_id": r.cortensor_session_id or r.job_id,
+                    "assertions_count": r.assertions_count,
+                    "assertions_passed": r.assertions_passed,
+                    "report_path": r.report_path,
+                    "report_filename": r.report_filename,
+                    "screenshots": [
+                        {
+                            "path": s.file_path,
+                            "filename": s.filename,
+                            "is_failure": s.is_failure,
+                        }
+                        for s in r.screenshots
+                    ],
+                    "assertions": json.loads(r.assertion_results) if r.assertion_results else [],
+                    "traces": json.loads(r.steps_log) if r.steps_log else (
+                        json.loads(r.live_steps) if r.live_steps else []
+                    ),
+                    "provider_used": r.llm_provider,
+                    "model_used": r.llm_model,
+                    "timestamp": r.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if r.created_at else "",
+                    "is_in_flight": False,
+                }
+    except Exception:
+        pass
+
+    # 3. Check in-memory history fallback
+    for item in _run_history:
+        if item.get("id") == job_id or item.get("job_id") == job_id:
+            return item
+
+    raise HTTPException(status_code=404, detail=f"Run '{job_id}' not found")
+
+
+@app.get("/api/targets")
+def list_canary_targets() -> List[Dict[str, Any]]:
+    """List registered dApps and web applications under canary monitoring."""
+    try:
+        with SessionLocal() as db:
+            targets = db.query(CanaryTarget).order_by(CanaryTarget.created_at.desc()).all()
+            return [
+                {
+                    "id": t.id,
+                    "name": t.name,
+                    "base_url": t.base_url,
+                    "description": t.description,
+                    "login_hint": t.login_hint,
+                    "schedule_interval_minutes": t.schedule_interval_minutes,
+                    "is_active": t.is_active,
+                    "runs_count": len(t.runs),
+                    "created_at": t.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if t.created_at else "",
+                }
+                for t in targets
+            ]
+    except Exception:
+        return []
+
+
+@app.post("/api/targets")
+def create_canary_target(payload: CanaryTargetCreate) -> Dict[str, Any]:
+    """Register a new dApp or application for continuous canary monitoring."""
+    with SessionLocal() as db:
+        target = CanaryTarget(
+            name=payload.name,
+            base_url=payload.base_url,
+            description=payload.description,
+            login_hint=payload.login_hint,
+            schedule_interval_minutes=payload.schedule_interval_minutes,
+            is_active=True,
+            created_at=utc_now(),
+        )
+        db.add(target)
+        db.commit()
+        db.refresh(target)
+        return {
+            "id": target.id,
+            "name": target.name,
+            "base_url": target.base_url,
+            "description": target.description,
+            "login_hint": target.login_hint,
+            "schedule_interval_minutes": target.schedule_interval_minutes,
+            "is_active": target.is_active,
+            "created_at": target.created_at.strftime("%Y-%m-%d %H:%M:%S UTC") if target.created_at else "",
+        }
 
 
 @app.post("/api/run-autonomous")
 def run_autonomous_goal(payload: AutonomousRunRequest) -> Dict[str, Any]:
     """Execute natural-language goal-driven autonomous QA via OpenMinion multi-turn LLM loop."""
+    job_id = f"auto_{uuid4().hex[:10]}"
     cfg = MinionQAConfig(headless=payload.headless)
-    planner = AutonomousGoalPlanner(config=cfg, max_turns=payload.max_turns)
+    planner = AutonomousGoalPlanner(config=cfg, max_turns=payload.max_turns, session_id=job_id)
+
+    # Register step listener with background worker for live streaming
+    def on_step(trace: PlannerStepTrace):
+        step_dict = {
+            "step_number": trace.step_number,
+            "thought": trace.thought,
+            "action": trace.action,
+            "selector": trace.selector,
+            "value": trace.value,
+            "result": trace.result,
+            "status": trace.status,
+            "duration_s": trace.duration_s,
+            "screenshot_path": Path(trace.screenshot_path).name if trace.screenshot_path else None,
+        }
+        default_worker.append_step(job_id, step_dict)
 
     try:
-        result = planner.execute_goal(goal=payload.goal, start_url=payload.url)
+        result = planner.execute_goal(
+            goal=payload.goal,
+            start_url=payload.url,
+            on_step_callback=on_step,
+        )
         report_filename = Path(result.report_path).name if result.report_path else ""
 
         screenshots = []
@@ -143,26 +488,25 @@ def run_autonomous_goal(payload: AutonomousRunRequest) -> Dict[str, Any]:
             for t in result.traces
         ]
 
-        run_record = {
-            "id": uuid4().hex[:8],
-            "name": f"Autonomous: {payload.goal[:45]}...",
-            "target_url": payload.url,
-            "goal": payload.goal,
-            "status": result.status,
-            "duration": result.duration_s,
-            "session_id": result.session_id,
-            "assertions_count": result.assertions_count,
-            "assertions_passed": result.assertions_passed,
-            "report_path": result.report_path,
-            "report_filename": report_filename,
-            "screenshots": screenshots,
-            "assertions": assertion_records,
-            "traces": traces_data,
-            "provider_used": result.provider_used,
-            "model_used": result.model_used,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
-        }
-        _run_history.append(run_record)
+        run_record = _persist_run_to_db(
+            job_id=job_id,
+            name=f"Autonomous: {payload.goal[:45]}...",
+            goal=payload.goal,
+            target_url=payload.url,
+            status=result.status,
+            duration=result.duration_s,
+            session_id=result.session_id,
+            assertions_count=result.assertions_count,
+            assertions_passed=result.assertions_passed,
+            report_path=result.report_path,
+            report_filename=report_filename,
+            screenshots=screenshots,
+            assertions=assertion_records,
+            traces=traces_data,
+            provider_used=result.provider_used,
+            model_used=result.model_used,
+            error_message=result.error_message,
+        )
         return run_record
     finally:
         reset_browser_session()
@@ -191,23 +535,24 @@ def run_ecommerce_test(payload: EcommerceRunRequest) -> Dict[str, Any]:
             steps=steps,
             report_output_path=report_path,
         )
-        run_record = {
-            "id": uuid4().hex[:8],
-            "name": test_title,
-            "target_url": "https://www.saucedemo.com",
-            "status": result["status"],
-            "duration": result["duration"],
-            "session_id": result["session_id"],
-            "assertions_count": result["assertions_count"],
-            "assertions_passed": result["assertions_passed"],
-            "report_path": result["report_path"],
-            "report_filename": report_filename,
-            "screenshots": result["screenshots"],
-            "assertions": result.get("assertions", []),
-            "traces": [],
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
-        }
-        _run_history.append(run_record)
+        run_record = _persist_run_to_db(
+            job_id=f"ecom_{uuid4().hex[:8]}",
+            name=test_title,
+            goal="E-Commerce Checkout & Revenue Flow Validation",
+            target_url="https://www.saucedemo.com",
+            status=result["status"],
+            duration=result["duration"],
+            session_id=result["session_id"],
+            assertions_count=result["assertions_count"],
+            assertions_passed=result["assertions_passed"],
+            report_path=result["report_path"],
+            report_filename=report_filename,
+            screenshots=result["screenshots"],
+            assertions=result.get("assertions", []),
+            traces=[],
+            provider_used="openminion-oracle",
+            model_used="deterministic-evaluator",
+        )
         return run_record
     finally:
         agent.close()
@@ -247,23 +592,24 @@ def run_custom_test(payload: CustomRunRequest) -> Dict[str, Any]:
             steps=steps,
             report_output_path=report_path,
         )
-        run_record = {
-            "id": uuid4().hex[:8],
-            "name": payload.name,
-            "target_url": payload.url,
-            "status": result["status"],
-            "duration": result["duration"],
-            "session_id": result["session_id"],
-            "assertions_count": result["assertions_count"],
-            "assertions_passed": result["assertions_passed"],
-            "report_path": result["report_path"],
-            "report_filename": report_filename,
-            "screenshots": result["screenshots"],
-            "assertions": result.get("assertions", []),
-            "traces": [],
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
-        }
-        _run_history.append(run_record)
+        run_record = _persist_run_to_db(
+            job_id=f"custom_{uuid4().hex[:8]}",
+            name=payload.name,
+            goal=f"Custom check on {payload.url}",
+            target_url=payload.url,
+            status=result["status"],
+            duration=result["duration"],
+            session_id=result["session_id"],
+            assertions_count=result["assertions_count"],
+            assertions_passed=result["assertions_passed"],
+            report_path=result["report_path"],
+            report_filename=report_filename,
+            screenshots=result["screenshots"],
+            assertions=result.get("assertions", []),
+            traces=[],
+            provider_used="openminion-oracle",
+            model_used="deterministic-evaluator",
+        )
         return run_record
     finally:
         agent.close()
