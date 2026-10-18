@@ -57,6 +57,11 @@ class MinionQAConfig:
         )
     )
 
+    # Database Storage Settings
+    database_url: str = field(
+        default_factory=lambda: os.getenv("DATABASE_URL", "sqlite:///./minionqa.db")
+    )
+
     # OpenMinion Agent Runtime
     session_id: Optional[str] = None
     enable_policy_gating: bool = True
