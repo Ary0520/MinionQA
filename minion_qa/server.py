@@ -52,10 +52,20 @@ init_db()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """FastAPI lifecycle manager: starts background worker and ensures DB schema."""
+    """FastAPI lifecycle manager: starts background worker, scheduler, and ensures DB schema."""
     init_db()
     default_worker.start()
+    try:
+        from minion_qa.canary_scheduler import default_scheduler
+        default_scheduler.start()
+    except Exception:
+        pass
     yield
+    try:
+        from minion_qa.canary_scheduler import default_scheduler
+        await default_scheduler.stop()
+    except Exception:
+        pass
     await default_worker.stop()
 
 
@@ -472,6 +482,48 @@ def get_target_map_endpoint(target_id: int) -> Dict[str, Any]:
     if not cmap:
         raise HTTPException(status_code=404, detail="Canary map not found for this target")
     return cmap.model_dump()
+
+
+@app.post("/api/targets/{target_id}/schedule")
+def set_target_schedule_endpoint(
+    target_id: int,
+    interval_minutes: int = Query(60, ge=1, le=10080),
+    enabled: bool = Query(True),
+) -> Dict[str, Any]:
+    """Configure recurring 24/7 Canary Watchdog schedule for a target."""
+    from minion_qa.canary_scheduler import schedule_target
+    try:
+        return schedule_target(target_id=target_id, interval_minutes=interval_minutes, enabled=enabled)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/api/targets/{target_id}/schedule")
+def get_target_schedule_endpoint(target_id: int) -> Dict[str, Any]:
+    """Retrieve recurring Canary Watchdog schedule status for a target."""
+    from minion_qa.canary_scheduler import get_target_schedule
+    sched = get_target_schedule(target_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="No schedule found for this target")
+    return sched
+
+
+@app.get("/api/schedules")
+def list_schedules_endpoint() -> List[Dict[str, Any]]:
+    """List all registered Canary Watchdog schedules."""
+    from minion_qa.canary_scheduler import list_schedules
+    return list_schedules()
+
+
+@app.post("/api/targets/{target_id}/trigger")
+def trigger_target_canary_endpoint(target_id: int) -> Dict[str, Any]:
+    """Manually trigger an immediate canary test run with regression detection."""
+    from minion_qa.canary_scheduler import run_canary_for_target
+    try:
+        return run_canary_for_target(target_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
 
 
 

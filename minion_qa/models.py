@@ -65,6 +65,7 @@ class CanaryTarget(Base):
     runs = relationship("CanaryRun", back_populates="target", cascade="all, delete-orphan")
     learned_locators = relationship("LearnedLocator", back_populates="target", cascade="all, delete-orphan")
     map_nodes = relationship("CanaryMapNode", back_populates="target", cascade="all, delete-orphan")
+    schedule = relationship("CanarySchedule", back_populates="target", uselist=False, cascade="all, delete-orphan")
 
 
 class CanaryRun(Base):
@@ -237,4 +238,28 @@ class CanaryMapNode(Base):
     created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     target = relationship("CanaryTarget", back_populates="map_nodes")
+
+
+class CanarySchedule(Base):
+    """
+    Recurring 24/7 Canary Watchdog schedule for a CanaryTarget.
+    Triggers automated canary test runs against discovered CanaryMap nodes and detects regressions.
+    """
+
+    __tablename__ = "canary_schedules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("canary_targets.id"), unique=True, nullable=False, index=True)
+    interval_minutes = Column(Integer, default=60, nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    next_run_at = Column(DateTime(timezone=True), nullable=True)
+    last_verdict = Column(String(32), nullable=True)  # PASSED | FAILED | REGRESSION
+    regression_count = Column(Integer, default=0, nullable=False)
+    total_runs = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+    target = relationship("CanaryTarget", back_populates="schedule")
+
 
