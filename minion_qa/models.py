@@ -64,6 +64,7 @@ class CanaryTarget(Base):
 
     runs = relationship("CanaryRun", back_populates="target", cascade="all, delete-orphan")
     learned_locators = relationship("LearnedLocator", back_populates="target", cascade="all, delete-orphan")
+    map_nodes = relationship("CanaryMapNode", back_populates="target", cascade="all, delete-orphan")
 
 
 class CanaryRun(Base):
@@ -210,3 +211,30 @@ class LearnedLocator(Base):
     )
 
     target = relationship("CanaryTarget", back_populates="learned_locators")
+
+
+class CanaryMapNode(Base):
+    """
+    A discovered page, form, or flow node in a CanaryTarget's application map.
+    Enables autonomous coverage intelligence and automated canary regression test generation.
+    """
+
+    __tablename__ = "canary_map_nodes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    target_id = Column(Integer, ForeignKey("canary_targets.id"), nullable=False, index=True)
+    node_type = Column(String(32), default="page", nullable=False)  # page | form | flow | action
+    label = Column(String(500), nullable=False)
+    url = Column(String(2048), nullable=True)
+    description = Column(Text, nullable=True)
+    business_category = Column(String(64), nullable=True)  # auth | billing | checkout | swap | wallet | navigation | content | other
+    connects_to = Column(Text, nullable=True)  # JSON list of connected node labels
+    depends_on = Column(Text, nullable=True)   # JSON list of precondition node labels
+    flow_steps = Column(Text, nullable=True)   # JSON list of step labels for flows
+    suggested_prompt = Column(Text, nullable=True)
+    is_covered = Column(Boolean, default=False, nullable=False)
+    last_tested_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+    target = relationship("CanaryTarget", back_populates="map_nodes")
+

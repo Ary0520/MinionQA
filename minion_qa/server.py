@@ -449,6 +449,32 @@ def create_canary_target(payload: CanaryTargetCreate) -> Dict[str, Any]:
         }
 
 
+@app.post("/api/targets/{target_id}/explore")
+def explore_target_endpoint(target_id: int, max_pages: int = Query(5)) -> Dict[str, Any]:
+    """Autonomously explore a CanaryTarget, build its CanaryMap, and persist to database."""
+    from minion_qa.canary_explorer import CanaryExplorer
+    with SessionLocal() as db:
+        target = db.query(CanaryTarget).filter(CanaryTarget.id == target_id).first()
+        if not target:
+            raise HTTPException(status_code=404, detail="Target not found")
+        base_url = target.base_url
+
+    explorer = CanaryExplorer(headless=True)
+    canary_map = explorer.explore(base_url=base_url, target_id=target_id, max_pages=max_pages)
+    return canary_map.model_dump()
+
+
+@app.get("/api/targets/{target_id}/map")
+def get_target_map_endpoint(target_id: int) -> Dict[str, Any]:
+    """Retrieve the discovered CanaryMap topology for a CanaryTarget."""
+    from minion_qa.canary_explorer import get_canary_map_for_target
+    cmap = get_canary_map_for_target(target_id)
+    if not cmap:
+        raise HTTPException(status_code=404, detail="Canary map not found for this target")
+    return cmap.model_dump()
+
+
+
 @app.get("/api/locators")
 def get_locators(target_id: Optional[int] = Query(None)) -> List[Dict[str, Any]]:
     """Retrieve durable learned locators and self-healing memory."""
