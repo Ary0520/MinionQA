@@ -155,3 +155,26 @@ def test_get_learned_locators_endpoint():
     assert response.status_code == 200
     assert isinstance(response.json(), list)
 
+
+def test_get_run_attestation_endpoint():
+    """Verify GET /api/runs/{job_id}/attestation returns cryptographic network proof."""
+    # First create a run
+    custom_payload = {
+        "name": "Attestation Verification Test",
+        "url": "https://example.com",
+        "expected_text": "Example",
+    }
+    run_res = client.post("/api/run-custom", json=custom_payload)
+    assert run_res.status_code == 200
+    job_id = run_res.json()["job_id"]
+
+    # Query attestation endpoint
+    att_res = client.get(f"/api/runs/{job_id}/attestation")
+    assert att_res.status_code == 200
+    att_data = att_res.json()
+    assert "attestation" in att_data
+    assert "verification" in att_data
+    assert att_data["verification"]["verified"] is True
+    assert "cort_miner_" in att_data["attestation"]["miner_id"]
+    assert len(att_data["attestation"]["raw_response_hash"]) == 64
+

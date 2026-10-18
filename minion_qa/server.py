@@ -198,6 +198,18 @@ def _persist_run_to_db(
                         ))
 
             db.commit()
+
+            # Record Cortensor NetworkSentinel decentralized execution proof
+            try:
+                from minion_qa.sentinel import record_attestation
+                record_attestation(
+                    run_identifier=db_run.id,
+                    node_type="mainnet" if default_config.cortensor_api_key else "trial",
+                    session_id=session_id,
+                    model_id=model_used or default_config.model,
+                )
+            except Exception as sentinel_exc:
+                pass
     except Exception as exc:
         pass  # In-memory record is still preserved below
 
@@ -369,6 +381,20 @@ def get_run(job_id: str) -> Dict[str, Any]:
             return item
 
     raise HTTPException(status_code=404, detail=f"Run '{job_id}' not found")
+
+
+@app.get("/api/runs/{job_id}/attestation")
+def get_run_attestation(job_id: str) -> Dict[str, Any]:
+    """Retrieve Cortensor decentralized network attestation and cryptographic proof for a run."""
+    from minion_qa.sentinel import get_attestation, verify_run_attestation
+    att = get_attestation(job_id)
+    if not att:
+        raise HTTPException(status_code=404, detail=f"No NetworkSentinel attestation found for run '{job_id}'")
+    verification = verify_run_attestation(job_id)
+    return {
+        "attestation": att,
+        "verification": verification,
+    }
 
 
 @app.get("/api/targets")
