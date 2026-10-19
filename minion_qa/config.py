@@ -62,6 +62,11 @@ class MinionQAConfig:
         default_factory=lambda: os.getenv("DATABASE_URL", "sqlite:///./minionqa.db")
     )
 
+    # CI/CD Webhook Token
+    ci_token: str = field(
+        default_factory=lambda: os.getenv("MINIONQA_CI_TOKEN", "minionqa-ci-secret-token")
+    )
+
     # OpenMinion Agent Runtime
     session_id: Optional[str] = None
     enable_policy_gating: bool = True

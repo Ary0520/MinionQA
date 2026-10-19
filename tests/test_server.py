@@ -203,3 +203,34 @@ def test_stream_run_endpoint():
     assert "text/event-stream" in stream_res.headers.get("content-type", "")
 
 
+def test_ci_webhook_endpoint():
+    """Verify POST /api/webhook/ci triggers canary runs for CI/CD pipelines."""
+    t_res = client.post("/api/targets", json={
+        "name": "CI Pipeline Monitored dApp",
+        "base_url": "https://ci-dapp.test.local",
+    })
+    target_id = t_res.json()["id"]
+
+    webhook_payload = {
+        "event": "push",
+        "repository": "Ary0520/MinionQA",
+        "commit_sha": "abc1234567890",
+        "ref": "refs/heads/main",
+        "target_id": target_id,
+    }
+
+    res = client.post(
+        "/api/webhook/ci",
+        json=webhook_payload,
+        headers={"X-CI-Token": "minionqa-ci-secret-token"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "dispatched"
+    assert data["event"] == "push"
+    assert data["commit_sha"] == "abc1234567890"
+    assert data["total_targets_dispatched"] >= 1
+    assert any(j["target_id"] == target_id for j in data["jobs"])
+
+
+

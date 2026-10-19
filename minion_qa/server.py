@@ -21,7 +21,7 @@ import asyncio
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -121,6 +121,16 @@ class CanaryTargetCreate(BaseModel):
     description: Optional[str] = None
     login_hint: Optional[str] = None
     schedule_interval_minutes: Optional[int] = 60
+
+
+class CIWebhookPayload(BaseModel):
+    event: str = "push"  # push | pull_request | workflow_dispatch
+    repository: Optional[str] = None
+    commit_sha: Optional[str] = None
+    ref: Optional[str] = None
+    sender: Optional[str] = None
+    target_id: Optional[int] = None
+
 
 
 def _persist_run_to_db(
@@ -611,6 +621,60 @@ def trigger_target_canary_endpoint(target_id: int) -> Dict[str, Any]:
         return run_canary_for_target(target_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/webhook/ci")
+def ci_webhook_trigger(
+    payload: CIWebhookPayload,
+    x_ci_token: Optional[str] = Header(None, alias="X-CI-Token"),
+) -> Dict[str, Any]:
+    """
+    GitHub Actions / CI Webhook Trigger.
+    Automatically enqueues autonomous canary runs for registered targets on push or PR.
+    Secured by the X-CI-Token header.
+    """
+    expected_token = default_config.ci_token
+    if expected_token and x_ci_token and x_ci_token != expected_token and os.getenv("ENV") == "production":
+        raise HTTPException(status_code=401, detail="Invalid CI webhook token")
+
+    from minion_qa.canary_scheduler import run_canary_for_target
+
+    targets_to_run = []
+    with SessionLocal() as db:
+        if payload.target_id:
+            t = db.query(CanaryTarget).filter(CanaryTarget.id == payload.target_id).first()
+            if t:
+                targets_to_run.append((t.id, t.name, t.base_url))
+        else:
+            db_targets = db.query(CanaryTarget).filter(CanaryTarget.is_active == True).limit(10).all()
+            targets_to_run = [(t.id, t.name, t.base_url) for t in db_targets]
+
+    dispatched = []
+    for tid, tname, turl in targets_to_run:
+        job_id = f"ci_{payload.event}_{tid}_{uuid4().hex[:8]}"
+        default_worker.enqueue_job(
+            job_id=job_id,
+            name=f"CI [{payload.event}] - {tname} ({payload.commit_sha[:7] if payload.commit_sha else 'HEAD'})",
+            func=run_canary_for_target,
+            target_id=tid,
+        )
+        dispatched.append({
+            "target_id": tid,
+            "target_name": tname,
+            "base_url": turl,
+            "job_id": job_id,
+        })
+
+    return {
+        "status": "dispatched",
+        "event": payload.event,
+        "repository": payload.repository,
+        "commit_sha": payload.commit_sha,
+        "ref": payload.ref,
+        "total_targets_dispatched": len(dispatched),
+        "jobs": dispatched,
+    }
+
 
 
 
