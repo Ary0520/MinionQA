@@ -247,3 +247,23 @@ def list_learned_locators(target_id: Optional[int] = None) -> List[Dict[str, Any
     except Exception as exc:
         logger.error("Failed to list learned locators: %s", exc)
         return []
+
+
+def build_memory_hint(target_id: Optional[int] = None) -> str:
+    """
+    Construct a markdown prompt hint detailing previously learned, durable DOM selectors
+    for this target dApp, so OpenMinion / LLM planners can select the correct selectors immediately.
+    """
+    locators = list_learned_locators(target_id=target_id)
+    if not locators:
+        return ""
+
+    lines = ["\n[Durable Self-Healing Locator Memory]:"]
+    for loc in locators[:10]:
+        orig = loc.get("original_selector") or "unknown"
+        healed = loc.get("selector")
+        txt = loc.get("element_text") or ""
+        seen = loc.get("times_seen", 1)
+        lines.append(f"- Learned: '{orig}' -> '{healed}' (text: '{txt}', confirmed {seen}x)")
+    return "\n".join(lines)
+
